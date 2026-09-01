@@ -1,0 +1,149 @@
+/* WinDepth's game object - the ~25KB struct the original keeps at a single
+ * global and passes around as `this`.  Field names map onto the offsets the
+ * decompilation shows; the comments give the original offset so the two can be
+ * compared.
+ *
+ * Everything runs at a fixed 20Hz (the original arms a 50ms timer in
+ * FUN_00401cd0) on a 512x384 8bpp surface.
+ */
+#ifndef GAME_H
+#define GAME_H
+
+#include "video.h"
+#include "stage.h"
+
+/* app mode - original +0x500 */
+enum { MODE_TITLE = 0, MODE_PLAY = 1, MODE_NAME = 3, MODE_LOGO = 4 };
+/* play state - original +0x451c */
+enum { PS_NONE = 0, PS_PLAY = 1, PS_RESPAWN = 2, PS_GAMEOVER = 3, PS_CLEAR = 5 };
+
+/* pad bits, as FUN_0040f110 packs them */
+#define PAD_UP    0x0001
+#define PAD_DOWN  0x0002
+#define PAD_LEFT  0x0004
+#define PAD_RIGHT 0x0008
+#define PAD_BTN1  0x0010
+#define PAD_BTN2  0x0020
+#define PAD_ESC   0x8000
+
+/* sound slots, in the order FUN_0040da00 registers them */
+enum { SND_BURN = 0, SND_START = 1, SND_ENESHOT = 2, SND_ITEM = 3,
+       SND_PLANE = 4, SND_DROP = 5 };
+
+#define MAX_ENEMY  33
+#define MAX_BOMB   24
+#define PLAYER_BOMBS 4     /* slots 0..3 are the ship's, the rest the plane's */
+#define MAX_SHOT   48
+#define MAX_BURN   48
+#define MAX_SPLASH 24
+#define MAX_ITEM    4
+#define MAX_POPUP  33
+#define MAX_SCORES 10
+
+typedef struct {           /* +0x4d34, stride 0x2c */
+    int alive;             /* 0 = free; kind 3 toggles between 1 and 2 */
+    int kind;              /* 0..4 from the stage weights, 9 = item fish */
+    int x, y;
+    int vx, vy;
+    int nvx, nvy;          /* challenge script's post-VChangeTime velocity */
+    int face;              /* last non-zero vx, picks the L/R sprite */
+    int frame;
+    int timer;
+} Enemy;
+
+typedef struct { int frame, x, y, vx, vy; } Bomb;      /* +0x5794, stride 0x14 */
+typedef struct { int frame, kind, x, y, vx, vy; } Shot;/* +0x52e0, stride 0x18 */
+typedef struct { int frame, x, y, chain, hits; } Burn; /* +0x5974, stride 0x14 */
+typedef struct { int frame, x, y; } Splash;            /* +0x5d34, stride 0x0c */
+typedef struct { int t, kind, x, y, vx, vy; } Item;    /* +0x5e54, stride 0x18 */
+typedef struct { int t, x, y, ndig, value, chain; } Popup; /* +0x5eb4, stride 0x18 */
+
+typedef struct {                    /* +0x425860, stride 0x2c */
+    unsigned score;
+    int level;
+    int maxhit;
+    int fallnum;
+    char name[10];
+    char date[10];
+    int sent;
+    int chksum;
+} ScoreEntry;
+
+typedef struct {
+    Video *v;
+    const Dar *dar;
+    Stage st;
+    char datpath[512];
+
+    int mode;             /* +0x500  */
+    int pstate;           /* +0x451c */
+    int stageno;          /* +0x4520 */
+    int stimer;           /* +0x4cfc - frames since the state changed */
+
+    int use_mouse;        /* +0x450c */
+    int sfx_on;           /* +0x4510 */
+    int bgm_on;           /* +0x4514 */
+
+    int px, py, pvx;      /* +0x4d04 +0x4d08 +0x4d0c */
+    int lives;            /* +0x4cec */
+    unsigned score;       /* +0x4cdc - the run's total */
+    unsigned stagescore;  /* +0x4ce4 - this stage only, shown on CLEAR */
+    unsigned hiscore;     /* +0x4ce0 */
+    int maxchain;         /* +0x4cf4 */
+    int fallnum;          /* +0x4ce8 */
+
+    int bombs_ready;      /* +0x4d14 */
+    int bomb_icon;        /* +0x4d18 - cycles 1..4 for the HUD icon */
+    int fish_flag;        /* +0x4554 - 1 = spawn the fish, 2 = spawned */
+    int live_enemies;     /* +0x4550 */
+
+    int plane, planex, planey, planevx, planetimer;  /* +0x4d1c.. +0x4d30 */
+
+    int blink;            /* +0x61f8 - flips every tick, halves anim rates */
+    int wavephase;        /* +0x61f0 */
+    int logofade;         /* +0x61f4 */
+
+    int trig1, trig2;     /* +0x6204 +0x6200 - button release latches */
+    unsigned pad, padprev;/* +0x6214 +0x6210 */
+    int mx, my, mbl, mbr; /* mouse, fed in by the host each tick */
+    int mouse_in;
+
+    /* name entry - original +0x61cc.. */
+    int name_col, name_row, name_len, name_idx, name_done;
+    int name_timer;       /* +0x4cf8 counts down to the title screen */
+    int cur_entry;        /* +0x4cf0 - which score row is being edited */
+
+    Enemy  en[MAX_ENEMY];
+    Bomb   bomb[MAX_BOMB];
+    Shot   shot[MAX_SHOT];
+    Burn   burn[MAX_BURN];
+    Splash spl[MAX_SPLASH];
+    Item   item[MAX_ITEM];
+    Popup  pop[MAX_POPUP];
+
+    struct {              /* +0x5760.. */
+        int state;        /* 0 = absent, 1..8 = attack patterns, 9 = dying, 10 = dead */
+        int hp;
+        int boom;         /* pending hit sparks */
+        int x, y;
+        int vx, vy, dvy;
+        int lastvx;
+        int interval, timer, phase, gunalt;
+    } boss;
+
+    ScoreEntry top[MAX_SCORES];
+
+    unsigned rnd;         /* the MSVC LCG the original uses */
+} Game;
+
+/* Host hooks.  The Win32 and WASM front ends provide these. */
+void wd_sound(int slot, int loop);
+void wd_music(int which, int on);     /* which: 0 = windepth.mid, 1 = nameinn.mid */
+
+void game_init(Game *g, Video *v, const Dar *dar, const char *datpath);
+void game_tick(Game *g);              /* advance one 50ms frame and redraw */
+void game_start(Game *g);             /* menu "Start": begin a run */
+void game_title(Game *g);             /* back to the attract screen */
+int  game_rand(Game *g);
+
+#endif

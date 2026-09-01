@@ -1,0 +1,18 @@
+# Ghidra output and project - big, machine-generated, and reproducible with the
+# command in RESUME.md.
+/decomp/
+/ghidra_proj/
+
+# Resources unpacked straight out of the exe; data/ already holds the ones the
+# port needs, in the form it loads them.
+/orig/res/
+
+# Build output.  windepth.js / windepth.wasm ARE committed: Pages serves them.
+/windepth.exe
+/tests/*.exe
+/tests/out/
+/tests/dar/
+/tests/dar2/
+/tests/*.png
+/tests/dar_index.txt
+*.o

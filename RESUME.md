@@ -241,6 +241,35 @@ for (k = 4; k >= 0; k--)
 
 `0 BURN` / `1 START` / `2 ENESHOT` / `3 ITEM` / `4 PLANE` / `5 DROP`
 
+## BGM
+
+原作は `.mid` を `SMFDRV32.DLL`（LoadLibrary で動的に読む MIDI ドライバ）に渡すだけ。
+`FUN_00403030` が「BGM が有効かつまだ鳴っていなければ読み込んで再生」する形なので、
+**同じ曲を要求されても鳴り直さない**。移植も同じにしてある（`wd_music`）。
+
+| | |
+|---|---|
+| `Windepth.mid` | format 0 / division 96 / 4395 note-on / 186 s。ch0 sax(64), ch1 clarinet(71), ch2 strings(48), ch3 slap bass(36), ch4 guitar(27), ch5 piano(1), ch6 orchestra hit(55), ch7 muted guitar(28), ch9 ドラム 1660 発 |
+| `NAMEINN.MID` | format 0 / division 96 / 744 note-on / 48 s。ch0-2 すべて celesta(8) |
+
+* **ネイティブ**は MCI に投げる（Windows のシンセ = 原作と同じ経路）。
+* **WASM** は `src/smf.c` + `src/synth.c` で自前に合成する。ブラウザに MIDI 出力は無く、
+  再配布できるサウンドフォントも無い。加算合成で作った波形テーブルを 3 段の
+  帯域制限付きで持ち、ADSR と 1 次 LPF、ドラムだけノイズ + サイン。GM の
+  プログラム番号から音色を引く。ページ側は `ScriptProcessorNode` で
+  `wd_audio()` を叩くだけ（`AudioWorklet` は wasm をワーカへ持ち込む手間が要るので使わない）。
+
+**嵌りどころ 5: MCI の MIDI デバイスは `play <alias> repeat` を受け付けない。**
+`MCIERR_UNRECOGNIZED_KEYWORD` (259) を返して**何も鳴らずに黙る**。
+`play <alias> notify` にして `MM_MCINOTIFY` で先頭に戻して再生し直す。
+
+**嵌りどころ 6: SMF のテンポイベントでデータ 3 バイトを読み飛ばすのを忘れる。**
+テンポだけ特別扱いして早期に抜けると、その 3 バイトが次のデルタタイム／
+ステータスとして読まれてストリームが崩壊する。`Windepth.mid` は
+「note-on の総数は合っているのに tick_end が 35808 でなく 50164」、
+`NAMEINN.MID` は「イベントが 1 個しか採れない」という形で出た。
+メタ / SysEx の後は running status も切る（仕様どおり）。
+
 ## 残した原作の癖
 
 * 爆発 vs 自機の当たり判定が**敵の走査ループの内側**にある。つまり
@@ -259,8 +288,8 @@ for (k = 4; k >= 0; k--)
 4. ~~**ネイティブ版**~~ 済 — `src/main_win32.c`、8bpp DIB + `StretchDIBits`
 5. ~~**WASM 版**~~ 済 — `src/main_wasm.c` + `index.html`。
    パレット展開して RGBA を `putImageData`、**WebGL 不使用**
-6. **未実装** — `windepth.ini` へのハイスコア保存、スコア送信、ジョイスティック、
-   WASM 版の MIDI
+6. ~~**BGM**~~ 済 — ネイティブは MCI、WASM は `src/smf.c` + `src/synth.c`
+7. **未実装** — `windepth.ini` へのハイスコア保存、スコア送信、ジョイスティック
 
 ## 環境
 
@@ -292,3 +321,14 @@ for (k = 4; k >= 0; k--)
   ブラウザは両方グローバルスコープなのでそのまま動く。
 * w64devkit に zlib は無い。テストの PNG 書き出しは stored deflate を自前で作った
   (`tests/png.c`)。
+* fluidsynth / timidity / ffmpeg は入っていない。`gm.dls` は Windows にあるが
+  再配布できないので、BGM は自前合成一本にした。
+* **`cp data/Windepth.mid data/windepth.mid` は Windows では自爆する。**
+  大文字小文字を区別しないので同じファイルへのコピーになり、続く
+  `rm data/windepth.mid` が原本を消す（git から戻した）。
+  emscripten の `--embed-file` には元の名前のまま渡す。
+* シンセの検証は `tests/midi2wav.exe` で WAV に書き出し、
+  numpy でエンベロープの自己相関（拍が合っているか）と FFT のピーク
+  （鳴っている MIDI ノートと一致するか）を見た。8/16 秒の時点で
+  MIDI が 43,55,67 / 30,42,50,54,66,69,74 のとき、レンダ側のピークも
+  55,67,79 / 54,66,74 になる。

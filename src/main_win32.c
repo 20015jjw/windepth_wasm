@@ -58,14 +58,21 @@ void wd_sound(int slot, int loop)
                SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }
 
+/* MIDI through MCI, which is as close as this gets to the original: it handed
+ * the files to SMFDRV32.DLL, i.e. to whatever synthesiser Windows provides.
+ *
+ * "play <alias> repeat" is NOT accepted by the MIDI sequencer device - it
+ * answers MCIERR_UNRECOGNIZED_KEYWORD (259) and nothing plays at all, silently.
+ * Loop by asking for a notification instead and restarting on MM_MCINOTIFY. */
+static int g_music_which = -1;
+
 void wd_music(int which, int on)
 {
-    static int playing = -1;
     char cmd[MAX_PATH + 64];
 
-    if (playing >= 0) {
+    if (g_music_which >= 0) {
         mciSendStringA("close wdmidi", NULL, 0, NULL);
-        playing = -1;
+        g_music_which = -1;
     }
     if (!on)
         return;
@@ -73,8 +80,19 @@ void wd_music(int which, int on)
             which == 1 ? "NAMEINN.MID" : "Windepth.mid");
     if (mciSendStringA(cmd, NULL, 0, NULL) != 0)
         return;
-    mciSendStringA("play wdmidi repeat", NULL, 0, NULL);
-    playing = which;
+    if (mciSendStringA("play wdmidi notify", NULL, 0, g_hwnd) != 0) {
+        mciSendStringA("close wdmidi", NULL, 0, NULL);
+        return;
+    }
+    g_music_which = which;
+}
+
+static void music_restart(void)
+{
+    if (g_music_which < 0)
+        return;
+    mciSendStringA("seek wdmidi to start", NULL, 0, NULL);
+    mciSendStringA("play wdmidi notify", NULL, 0, g_hwnd);
 }
 
 static void load_wavs(void)
@@ -216,6 +234,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         EndPaint(h, &ps);
         return 0;
     }
+
+    case MM_MCINOTIFY:
+        /* MCI_NOTIFY_SUCCESSFUL: the tune reached its end, so loop it. */
+        if (wp == MCI_NOTIFY_SUCCESSFUL)
+            music_restart();
+        return 0;
 
     case WM_KEYDOWN:
         switch (wp) {

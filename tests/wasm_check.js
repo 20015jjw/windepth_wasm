@@ -35,6 +35,31 @@ Module.wdSound = () => {};
   const rgba = Buffer.from(Module.HEAPU8.subarray(p, p + w * h * 4));
   fs.writeFileSync(out, png(w, h, rgba));
   console.log(`tick ${tick}: mode=${Module._wd_mode()} score=${Module._wd_score()} -> ${out}`);
+
+  // The music is synthesised inside the module; pull a few blocks and check it
+  // is actually producing signal at the rate the page would ask for.
+  const rate = 44100, block = 2048, blocks = 40;
+  Module._wd_audio_init(rate);
+  let peak = 0, sum = 0, n = 0;
+  const pl = Module._wd_audio_left() >> 2, pr = Module._wd_audio_right() >> 2;
+  for (let b = 0; b < blocks; b++) {
+    Module._wd_audio(block);
+    const l = Module.HEAPF32.subarray(pl, pl + block);
+    const r = Module.HEAPF32.subarray(pr, pr + block);
+    for (let i = 0; i < block; i++) {
+      peak = Math.max(peak, Math.abs(l[i]), Math.abs(r[i]));
+      sum += l[i] * l[i] + r[i] * r[i];
+      n += 2;
+    }
+  }
+  const rms = Math.sqrt(sum / n);
+  console.log(`music: ${(blocks * block / rate).toFixed(2)}s @ ${rate}Hz, ` +
+              `peak ${peak.toFixed(3)}, rms ${rms.toFixed(4)} ` +
+              `(${(20 * Math.log10(rms + 1e-12)).toFixed(1)} dBFS)`);
+  if (peak < 0.01) {
+    console.error('music is silent');
+    process.exit(1);
+  }
   process.exit(0);
 })();
 

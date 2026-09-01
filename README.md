@@ -6,6 +6,10 @@ Bio_100% の Windows フリーソフト **WinDepth 0.41** (1994-1998) を、
 * **ネイティブ (Win32)** — `windepth.exe`、8bpp DIB + GDI、依存は gdi32/winmm のみ
 * **WASM** — 同じコアを Emscripten でビルド。描画は全部ソフトウェア（**WebGL は使いません**）
 
+音は効果音（原作の WAV）と BGM（原作の MIDI）の両方が鳴ります。BGM はネイティブ版が
+MCI 経由で Windows のシンセに投げ、WASM 版は**自前の MIDI シンセ**（`src/synth.c`）で
+合成します。ブラウザに MIDI 出力が無く、再配布できるサウンドフォントも無いためです。
+
 遊ぶ: https://yomei-o.github.io/windepth_wasm/
 
 ```
@@ -14,6 +18,7 @@ Z / Space     左の爆雷投下
 X / Enter     右の爆雷投下
 F2            ゲーム開始
 Esc           タイトルへ
+F3 / F4       効果音 / 音楽の ON-OFF
 ```
 
 ## 何をどう作ったか
@@ -38,6 +43,8 @@ Esc           タイトルへ
 | `src/game.c` `src/game.h` | ゲーム本体（自機・敵・爆雷・ボス・アイテム・得点） |
 | `src/patterns.h` | DAR のパターン番号 |
 | `src/sintab.h` | 原作 `0x00421b18` の sin テーブル（波紋用、実物をそのまま） |
+| `src/smf.c` `src/smf.h` | 標準 MIDI ファイルのパーサ（トラックを 1 本にマージ） |
+| `src/synth.c` `src/synth.h` | GM 風のソフトシンセ。加算合成の波形テーブル 3 段 + ADSR + ドラム |
 | `src/main_win32.c` | Win32 フロントエンド |
 | `src/main_wasm.c` | Emscripten フロントエンド |
 | `index.html` | ブラウザ側（canvas + putImageData + Web Audio） |
@@ -77,8 +84,13 @@ sh tools/build_tests.sh
 # DAR の全 329 パターンを PNG で吐く（ゲームと同じデコーダを使う）
 mkdir -p tests/dar2 && ./tests/dumpdar.exe tests/dar2
 
-# WASM 側も node で同じフレームを出せる（ネイティブと一致するはず）
+# WASM 側も node で同じフレームを出せる（ネイティブと一致するはず）。
+# BGM が鳴っているかもここで確認する
 node tests/wasm_check.js 240 tests/out/wasm240.png
+
+# WASM 版の BGM を WAV に書き出して実際に聴く
+./tests/midi2wav.exe data/Windepth.mid tests/out/bgm.wav  40
+./tests/midi2wav.exe data/NAMEINN.MID  tests/out/name.wav 25
 ```
 
 `tools/shot.ps1` はネイティブ版のウィンドウを実際に撮るスクリプトですが、
@@ -97,7 +109,7 @@ GDI の経路を確認する時だけ使うもので、普段の検証には不�
 | `windepth.dar` | `Windepth.exe` のリソース `DAR/WIND_DAR` (278,268 B、329 パターン) |
 | `*.wav` | リソース `WAVE/BURN` `START` `ENESHOT` `ITEM` `PLANE` `DROP` |
 | `windepth.dat` | 配布物のステージ表（テキスト、無改変） |
-| `Windepth.mid` `NAMEINN.MID` | 配布物の BGM（ネイティブ版のみ、MCI で再生） |
+| `Windepth.mid` `NAMEINN.MID` | 配布物の BGM。ネイティブ版は MCI、WASM 版は `src/synth.c` で合成 |
 
 ## 権利について
 
@@ -115,7 +127,9 @@ WinDepth はもともと **Bio_100%** が配布していたフリーソフトで
   ネーム入力まで一通り動きます。
 * ハイスコアの保存（原作は `windepth.ini`）と、スコアをネットに送る機能は未実装。
   起動するたびに既定の 10 件から始まります。
-* WASM 版は BGM (MIDI) なし。ブラウザに MIDI 再生がないため。効果音は Web Audio。
+* BGM はネイティブ版と WASM 版で音が違います。ネイティブは Windows のシンセ
+  （原作と同じ経路）、WASM は `src/synth.c` の自前シンセなので、90 年前後の
+  サウンドカードくらいの音になります。
 * ジョイスティック入力は未実装（原作は `joyGetPosEx`）。
 
 解析の詳細は [RESUME.md](RESUME.md) にあります。

@@ -88,6 +88,11 @@ mkdir -p tests/dar2 && ./tests/dumpdar.exe tests/dar2
 # BGM が鳴っているかもここで確認する
 node tests/wasm_check.js 240 tests/out/wasm240.png
 
+# index.html の中身を Web Audio のスタブ相手に node で動かす。
+# --early はキー入力が wasm の準備より先に来る順序（これで一度無音になった）
+node tests/page_audio_check.js
+node tests/page_audio_check.js --early
+
 # WASM 版の BGM を WAV に書き出して実際に聴く
 ./tests/midi2wav.exe data/Windepth.mid tests/out/bgm.wav  40
 ./tests/midi2wav.exe data/NAMEINN.MID  tests/out/name.wav 25

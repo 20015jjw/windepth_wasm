@@ -256,14 +256,27 @@ for (k = 4; k >= 0; k--)
 * **WASM** は `src/smf.c` + `src/synth.c` で自前に合成する。ブラウザに MIDI 出力は無く、
   再配布できるサウンドフォントも無い。加算合成で作った波形テーブルを 3 段の
   帯域制限付きで持ち、ADSR と 1 次 LPF、ドラムだけノイズ + サイン。GM の
-  プログラム番号から音色を引く。ページ側は `ScriptProcessorNode` で
-  `wd_audio()` を叩くだけ（`AudioWorklet` は wasm をワーカへ持ち込む手間が要るので使わない）。
+  プログラム番号から音色を引く。ページ側は `wd_audio()` で 4096 フレームずつ
+  作って `AudioBufferSourceNode` を隙間なく予約していくだけ。
+  `ScriptProcessorNode` は入力 0 本の形が環境依存なので使わず、
+  `AudioWorklet` は wasm をワーカへ持ち込む手間が要るので使わない。
 
 **嵌りどころ 5: MCI の MIDI デバイスは `play <alias> repeat` を受け付けない。**
 `MCIERR_UNRECOGNIZED_KEYWORD` (259) を返して**何も鳴らずに黙る**。
 `play <alias> notify` にして `MM_MCINOTIFY` で先頭に戻して再生し直す。
 
-**嵌りどころ 6: SMF のテンポイベントでデータ 3 バイトを読み飛ばすのを忘れる。**
+**嵌りどころ 6: ブラウザ側で「音の出口」を作る条件を間違えると、
+効果音だけ鳴って BGM が一生鳴らない。**
+最初の版は「ユーザー操作の瞬間に wasm の準備ができていれば pump を作る」に
+なっていて、しかも AudioContext は先に作ってしまっていたので、以降の呼び出しは
+すべて先頭で return していた。効果音は AudioContext だけで鳴るし、F4 の
+ON/OFF 表示も出るので、一見それらしく動いてしまう。
+`ensureContext()`（操作側）と `ensurePump()`（wasm 準備側）に分け、
+どちらからでも足りない方だけ作るようにした。
+`tests/page_audio_check.js` が Web Audio のスタブ相手に index.html を
+node で動かして、両方の順序で音が出ることを見る。
+
+**嵌りどころ 7: SMF のテンポイベントでデータ 3 バイトを読み飛ばすのを忘れる。**
 テンポだけ特別扱いして早期に抜けると、その 3 バイトが次のデルタタイム／
 ステータスとして読まれてストリームが崩壊する。`Windepth.mid` は
 「note-on の総数は合っているのに tick_end が 35808 でなく 50164」、

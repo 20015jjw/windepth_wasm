@@ -27,6 +27,7 @@
     padding: 0 4px; font-family: inherit;
   }
   #status { min-height: 1.6em; opacity: .8; }
+  #diag { opacity: .45; font-size: 11px; font-family: ui-monospace, monospace; }
 </style>
 </head>
 <body>
@@ -39,6 +40,7 @@
   <kbd>F3</kbd> 効果音 &nbsp; <kbd>F4</kbd> 音楽
 </div>
 <div id="status">読み込み中…</div>
+<div id="diag"></div>
 
 <script>
 const PAD = { UP: 1, DOWN: 2, LEFT: 4, RIGHT: 8, BTN1: 0x10, BTN2: 0x20 };
@@ -52,51 +54,90 @@ const KEYMAP = {
 };
 // Same order as FUN_0040da00 registers them in the original.
 const SOUNDS = ['burn', 'start', 'eneshot', 'item', 'plane', 'drop'];
-const AUDIO_BLOCK = 2048;
 
 const cv = document.getElementById('screen');
 const ctx2d = cv.getContext('2d', { alpha: false });
 const statusEl = document.getElementById('status');
+const diagEl = document.getElementById('diag');
 let pad = 0, sfxOn = true, bgmOn = true, ready = false;
 
 // --- audio ----------------------------------------------------------------
-// Effects are decoded WAVs played per hit; music is synthesised inside the
-// wasm module and pulled here by a ScriptProcessorNode.  A worklet would be
-// tidier, but the node runs on the main thread and works everywhere, which
-// matters more for the machines this is aimed at.
+// Effects are decoded WAVs played per hit.  Music is synthesised inside the
+// wasm module and pulled out here: wd_audio() fills two float buffers, which
+// get copied into a short AudioBuffer and scheduled back to back.
+//
+// Only standard, non-deprecated nodes are used - no ScriptProcessorNode (whose
+// zero-input form is not reliable across engines) and no AudioWorklet (which
+// would mean getting the wasm into a worker).  A dropped interval only costs
+// the lookahead, and the pump re-anchors itself if it ever falls behind.
+const MUS_CHUNK = 4096;      // frames per generated buffer, <= wd_audio_max()
+const MUS_AHEAD = 0.4;       // seconds of audio kept queued
+const MUS_TICK  = 60;        // ms between top-ups
+
 const audio = {};
-let actx = null, pump = null;
+let actx = null, musGain = null, musNext = 0, musBlocks = 0, musTimer = 0;
 
-function startAudio() {
-  if (actx) {
-    if (actx.state === 'suspended') actx.resume();
-    return;
-  }
+/* Two things have to line up and they happen in either order: the
+ * AudioContext may only be created from a user gesture, and the pump needs the
+ * wasm module to be up.  So the gesture calls this, the module's init calls
+ * ensurePump(), and each does only the part that is still missing.
+ *
+ * Getting this wrong is what made the first version silent: the pump was
+ * created only when the module happened to already be ready, and every later
+ * gesture returned early because the context existed. */
+function ensureContext() {
   const AC = window.AudioContext || window.webkitAudioContext;
+
   if (!AC) return;
-  actx = new AC();
+  if (!actx) {
+    actx = new AC();
+    SOUNDS.forEach((name, i) => {
+      fetch('data/' + name + '.wav')
+        .then(r => r.arrayBuffer())
+        .then(b => new Promise((ok, no) => actx.decodeAudioData(b, ok, no)))
+        .then(buf => { audio[i] = buf; })
+        .catch(() => {});
+    });
+  }
+  if (actx.state === 'suspended')
+    actx.resume();
+  ensurePump();
+}
 
-  SOUNDS.forEach((name, i) => {
-    fetch('data/' + name + '.wav')
-      .then(r => r.arrayBuffer())
-      .then(b => new Promise((ok, no) => actx.decodeAudioData(b, ok, no)))
-      .then(buf => { audio[i] = buf; })
-      .catch(() => {});
-  });
-
-  if (!ready) return;
+function ensurePump() {
+  if (!actx || !ready || musTimer)
+    return;
+  musGain = actx.createGain();
+  musGain.gain.value = 1;
+  musGain.connect(actx.destination);
   Module._wd_audio_init(actx.sampleRate);
-  pump = actx.createScriptProcessor(AUDIO_BLOCK, 0, 2);
-  pump.onaudioprocess = ev => {
-    const n = ev.outputBuffer.length;
-    const l = ev.outputBuffer.getChannelData(0);
-    const r = ev.outputBuffer.getChannelData(1);
-    Module._wd_audio(n);
-    const pl = Module._wd_audio_left() >> 2, pr = Module._wd_audio_right() >> 2;
-    l.set(Module.HEAPF32.subarray(pl, pl + n));
-    r.set(Module.HEAPF32.subarray(pr, pr + n));
-  };
-  pump.connect(actx.destination);
+  musNext = 0;
+  musTimer = setInterval(musPump, MUS_TICK);
+  musPump();
+}
+
+function musPump() {
+  if (!actx || actx.state !== 'running')
+    return;
+  const rate = actx.sampleRate;
+  const pl = Module._wd_audio_left() >> 2;
+  const pr = Module._wd_audio_right() >> 2;
+
+  if (musNext < actx.currentTime)
+    musNext = actx.currentTime + 0.05;    // fell behind: re-anchor
+  while (musNext < actx.currentTime + MUS_AHEAD) {
+    const buf = actx.createBuffer(2, MUS_CHUNK, rate);
+    const src = actx.createBufferSource();
+
+    Module._wd_audio(MUS_CHUNK);
+    buf.getChannelData(0).set(Module.HEAPF32.subarray(pl, pl + MUS_CHUNK));
+    buf.getChannelData(1).set(Module.HEAPF32.subarray(pr, pr + MUS_CHUNK));
+    src.buffer = buf;
+    src.connect(musGain);
+    src.start(musNext);
+    musNext += MUS_CHUNK / rate;
+    musBlocks++;
+  }
 }
 
 var Module = {
@@ -113,9 +154,10 @@ var Module = {
       return;
     }
     ready = true;
+    ensurePump();           // in case a gesture already happened
     const w = Module._wd_width(), h = Module._wd_height();
     const img = ctx2d.createImageData(w, h);
-    statusEl.textContent = 'クリックか何かキーを押すと音が出ます / F2 で開始';
+    statusEl.textContent = 'クリックか何かキーを押すと音が出ます（BGM はロゴのあと） / F2 で開始';
 
     // 50ms, the same tick the original arms in FUN_00401cd0.
     setInterval(() => {
@@ -124,11 +166,18 @@ var Module = {
       img.data.set(Module.HEAPU8.subarray(p, p + w * h * 4));
       ctx2d.putImageData(img, 0, 0);
     }, 50);
+
+    setInterval(() => {
+      diagEl.textContent = actx
+        ? `audio ${actx.state} ${actx.sampleRate}Hz  music blocks ${musBlocks}` +
+          `  queued ${Math.max(0, musNext - actx.currentTime).toFixed(2)}s`
+        : 'audio: 未開始（クリックか何かキーを押してください）';
+    }, 500);
   }
 };
 
 addEventListener('keydown', e => {
-  startAudio();
+  ensureContext();
   if (!ready) return;
   if (e.code === 'F2') { Module._wd_start(); e.preventDefault(); return; }
   if (e.code === 'Escape') { Module._wd_title(); e.preventDefault(); return; }
@@ -153,7 +202,8 @@ addEventListener('keyup', e => {
   const bit = KEYMAP[e.code];
   if (bit) { pad &= ~bit; e.preventDefault(); }
 });
-cv.addEventListener('mousedown', startAudio);
+cv.addEventListener('mousedown', ensureContext);
+addEventListener('pointerdown', ensureContext);
 </script>
 <script src="windepth.js"></script>
 </body>

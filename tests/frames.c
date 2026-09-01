@@ -4,6 +4,9 @@
  *   frames <out-prefix> <tick>[,<tick>...] [--start N] [--keys MASK]
  *                       [--stage N] [--seed N]
  *
+ * --trace prints every mode/state transition, which is the quickest way to see
+ * the attract -> play -> game over -> splash cycle.
+ *
  * --start N presses "Start" at tick N; --keys applies a fixed pad mask from
  * then on; --stage jumps straight to a stage so the challenge and boss rounds
  * can be reached without playing through; --auto drives a crude autopilot that
@@ -30,7 +33,8 @@ int main(int argc, char **argv)
     Video vid;
     Game game;
     int want[64], nwant = 0, maxtick = 0, i, t;
-    int startat = -1, stage = 0, seed = 1, autoplay = 0;
+    int startat = -1, stage = 0, seed = 1, autoplay = 0, trace = 0;
+    int lastmode = -1, laststate = -1;
     unsigned keys = 0;
     const char *prefix = argc > 1 ? argv[1] : "frame";
 
@@ -53,6 +57,8 @@ int main(int argc, char **argv)
             seed = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--auto"))
             autoplay = 1;
+        else if (!strcmp(argv[i], "--trace"))
+            trace = 1;
     }
     for (i = 0; i < nwant; i++)
         if (want[i] > maxtick)
@@ -93,6 +99,13 @@ int main(int argc, char **argv)
             game.pad = (startat >= 0 && t > startat) ? keys : 0;
         }
         game_tick(&game);
+        if (trace && (game.mode != lastmode || game.pstate != laststate)) {
+            printf("t=%-5d mode %d -> %d, pstate %d -> %d  stage=%d score=%u\n",
+                   t, lastmode, game.mode, laststate, game.pstate,
+                   game.stageno, game.score);
+            lastmode = game.mode;
+            laststate = game.pstate;
+        }
         for (i = 0; i < nwant; i++)
             if (want[i] == t) {
                 char path[512];

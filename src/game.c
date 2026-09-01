@@ -1229,6 +1229,41 @@ static void draw_overlays(Game *g)
 
 /* --------------------------------------------------------- state changes */
 
+/* When the BGM starts.
+ *
+ * The original starts it only when a game starts.  FUN_00403030 - open the
+ * sequencer and play - has exactly two callers: FUN_00404780, i.e. "Start", for
+ * windepth.mid, and FUN_00404040, the name entry, for nameinn.mid.  Neither the
+ * Bio_100% splash (FUN_00403e30) nor the title screen (FUN_00403f90) touches
+ * it, and the splash tick plays no effect either, so both are silent.  It also
+ * refuses to restart a tune that is already running, and the stop
+ * (FUN_00403080) happens on game over, on the name entry timing out, and when
+ * the window is deactivated - never per stage.  So one pass of windepth.mid
+ * starts with the run and loops until it ends.
+ *
+ * Set this to 1 to play the tune over the attract screens as well.  It is off
+ * because starting the music with the run is what makes it line up with what is
+ * on screen; with it on, pressing Start drops you into the middle of a tune that
+ * has been looping since launch. */
+#define BGM_FROM_TITLE 0
+
+/* FUN_00403d80 - the Bio_100% splash, which is also where a finished game
+ * returns to.  It is not just a one-off intro. */
+void game_logo(Game *g)
+{
+    g->mode = MODE_LOGO;
+    g->pstate = PS_NONE;
+    g->logofade = 0x28;
+    g->stimer = 0;
+    g->stageno = 0;
+    clear_objects(g);
+    g->lives = 0;
+    g->px = 0xe0;
+    load_stage(g);
+    vid_dirty_all(g->v);
+    wd_music(0, BGM_FROM_TITLE ? g->bgm_on : 0);
+}
+
 void game_title(Game *g)
 {
     g->mode = MODE_TITLE;
@@ -1242,7 +1277,7 @@ void game_title(Game *g)
     g->lives = 0;
     g->blink = 0;
     g->stimer = 0;
-    wd_music(0, g->bgm_on);
+    wd_music(0, BGM_FROM_TITLE ? g->bgm_on : 0);
 }
 
 void game_start(Game *g)
@@ -1332,7 +1367,7 @@ static void tick_play_state(Game *g)
         if (g->stimer > 0x50) {
             wd_music(0, 0);
             if (g->score <= g->top[MAX_SCORES - 1].score)
-                game_title(g);
+                game_logo(g);
             else
                 enter_name(g);
         }
@@ -1406,7 +1441,7 @@ static void tick_name(Game *g)
         g->name_timer -= 0x32;
         if (g->name_timer < 0) {
             wd_music(0, 0);
-            game_title(g);
+            game_logo(g);
             return;
         }
     }
@@ -1618,9 +1653,7 @@ void game_init(Game *g, Video *v, const Dar *dar, const char *datpath)
     }
     g->hiscore = g->top[0].score;
 
-    g->mode = MODE_LOGO;
-    g->pstate = PS_NONE;
-    g->stimer = 0;
-    g->stageno = 0;
-    load_stage(g);
+    /* The original's app constructor ends by calling FUN_00403d80, so start
+     * where it starts: on the splash. */
+    game_logo(g);
 }

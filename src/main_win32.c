@@ -307,9 +307,6 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     build_bmi();
     vid_init(&g_vid, &g_dar);
 
-    sprintf(path, "%s\\windepth.dat", g_datadir);
-    game_init(&g_game, &g_vid, &g_dar, path);
-
     memset(&wc, 0, sizeof wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = wndproc;
@@ -331,6 +328,15 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
                              NULL, NULL, inst, NULL);
     if (!g_hwnd)
         return 1;
+
+    /* After the window exists: game_init runs the state machine's first
+     * transition, which can start the BGM, and MCI needs a window to send
+     * MM_MCINOTIFY to when a tune ends.  The frame timer is armed here rather
+     * than from WM_CREATE for the same reason. */
+    sprintf(path, "%s\\windepth.dat", g_datadir);
+    game_init(&g_game, &g_vid, &g_dar, path);
+    SetTimer(g_hwnd, WD_TIMER_ID, WD_FRAME_MS, NULL);
+
     ShowWindow(g_hwnd, show);
     UpdateWindow(g_hwnd);
 

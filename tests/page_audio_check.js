@@ -176,9 +176,9 @@ const early = process.argv.includes('--early');
         process.exit(1);
     }
 
-    /* Drive enough wall clock to get past the Bio_100% splash: it runs for
-     * 120 game ticks (6 s) and is deliberately silent, and only game_title()
-     * afterwards asks for a tune. */
+    /* Drive past the Bio_100% splash (120 game ticks = 6 s) into the title.
+     * Both are meant to be SILENT: the original only starts the sequencer when
+     * a game starts.  See BGM_FROM_TITLE in src/game.c. */
     const step = 0.05;
     const SECONDS = 12;
     let firstSound = -1, mode = -1;
@@ -203,8 +203,12 @@ const early = process.argv.includes('--early');
                 if (firstSound >= 0) break;
             }
     }
-    console.log('first audible block at t =',
-                firstSound < 0 ? 'never' : firstSound.toFixed(2) + 's');
+    console.log('attract screens: first audible block at t =',
+                firstSound < 0 ? 'never (correct)' : firstSound.toFixed(2) + 's');
+    if (firstSound >= 0) {
+        console.error('FAIL: the splash and title screens should be silent');
+        process.exit(1);
+    }
 
     const sch = ctx.scheduled;
     let peak = 0, frames = 0;
@@ -233,16 +237,16 @@ const early = process.argv.includes('--early');
         console.error('FAIL: nothing was scheduled - the pump never ran');
         process.exit(1);
     }
-    if (peak < 0.01) {
-        console.error('FAIL: the scheduled audio is silent');
-        process.exit(1);
-    }
-    if (firstSound < 0) {
-        console.error('FAIL: never produced an audible block');
-        process.exit(1);
-    }
     if (frames / ctx.sampleRate < SECONDS * 0.9) {
         console.error('FAIL: less than the wall clock was generated');
+        process.exit(1);
+    }
+
+    /* Start a game: that is where the BGM comes in, from the top of the tune. */
+    const play = drive('F2', 1.0);
+    console.log(`after Start: peak ${play.toFixed(3)}`);
+    if (play < 0.01) {
+        console.error('FAIL: no music once a game started');
         process.exit(1);
     }
 

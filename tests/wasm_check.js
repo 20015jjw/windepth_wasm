@@ -37,9 +37,12 @@ Module.wdSound = () => {};
   console.log(`tick ${tick}: mode=${Module._wd_mode()} score=${Module._wd_score()} -> ${out}`);
 
   // The music is synthesised inside the module; pull a few blocks and check it
-  // is actually producing signal at the rate the page would ask for.
+  // is actually producing signal at the rate the page would ask for.  It only
+  // starts with a game - the splash and title are silent, as in the original -
+  // so start one first.
   const rate = 44100, block = 2048, blocks = 40;
   Module._wd_audio_init(rate);
+  Module._wd_start();
   let peak = 0, sum = 0, n = 0;
   const pl = Module._wd_audio_left() >> 2, pr = Module._wd_audio_right() >> 2;
   for (let b = 0; b < blocks; b++) {

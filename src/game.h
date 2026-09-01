@@ -143,7 +143,9 @@ void wd_music(int which, int on);     /* which: 0 = windepth.mid, 1 = nameinn.mi
 void game_init(Game *g, Video *v, const Dar *dar, const char *datpath);
 void game_tick(Game *g);              /* advance one 50ms frame and redraw */
 void game_start(Game *g);             /* menu "Start": begin a run */
-void game_title(Game *g);             /* back to the attract screen */
+void game_logo(Game *g);              /* the Bio_100% splash, where a finished
+                                       * run returns to before the title */
+void game_title(Game *g);             /* the attract screen */
 int  game_rand(Game *g);
 
 #endif

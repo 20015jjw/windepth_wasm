@@ -10,6 +10,10 @@ Bio_100% の Windows フリーソフト **WinDepth 0.41** (1994-1998) を、
 MCI 経由で Windows のシンセに投げ、WASM 版は**自前の MIDI シンセ**（`src/synth.c`）で
 合成します。ブラウザに MIDI 出力が無く、再配布できるサウンドフォントも無いためです。
 
+**BGM が鳴り出すのはゲーム開始（F2）から**で、Bio ロゴとタイトルは無音です。
+これは原作どおりです（原作で BGM を開始するのは Start とネーム入力の 2 か所だけ）。
+タイトルからも鳴らしたい場合は `src/game.c` の `BGM_FROM_TITLE` を 1 にします。
+
 遊ぶ: https://yomei-o.github.io/windepth_wasm/
 
 ```
@@ -81,6 +85,9 @@ sh tools/build_tests.sh
 ./tests/frames.exe tests/out/c 260     --start 130 --stage 3  --auto   # チャレンジ面
 ./tests/frames.exe tests/out/b 500     --start 130 --stage 19 --auto   # ボス面
 
+# 状態遷移だけ見る（ロゴ→タイトル→プレイ→ゲームオーバー→ロゴ）
+./tests/frames.exe tests/out/z 3000 --start 130 --auto --trace
+
 # DAR の全 329 パターンを PNG で吐く（ゲームと同じデコーダを使う）
 mkdir -p tests/dar2 && ./tests/dumpdar.exe tests/dar2
 
@@ -134,7 +141,8 @@ WinDepth はもともと **Bio_100%** が配布していたフリーソフトで
   起動するたびに既定の 10 件から始まります。
 * BGM はネイティブ版と WASM 版で音が違います。ネイティブは Windows のシンセ
   （原作と同じ経路）、WASM は `src/synth.c` の自前シンセなので、90 年前後の
-  サウンドカードくらいの音になります。
+  サウンドカードくらいの音になります。曲は 2 つだけで、全ステージ共通の
+  `Windepth.mid` とネーム入力の `NAMEINN.MID` です（原作も面ごとには変わりません）。
 * ジョイスティック入力は未実装（原作は `joyGetPosEx`）。
 
 解析の詳細は [RESUME.md](RESUME.md) にあります。

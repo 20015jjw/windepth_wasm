@@ -157,7 +157,7 @@ var Module = {
     ensurePump();           // in case a gesture already happened
     const w = Module._wd_width(), h = Module._wd_height();
     const img = ctx2d.createImageData(w, h);
-    statusEl.textContent = 'クリックか何かキーを押すと音が出ます（BGM はロゴのあと） / F2 で開始';
+    statusEl.textContent = 'F2 で開始（BGM はゲーム開始から。原作と同じでタイトルは無音）';
 
     // 50ms, the same tick the original arms in FUN_00401cd0.
     setInterval(() => {

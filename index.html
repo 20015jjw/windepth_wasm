@@ -33,10 +33,13 @@
 <body>
 <canvas id="screen" width="512" height="384"></canvas>
 <div class="keys">
-  <kbd>&larr;</kbd> <kbd>&rarr;</kbd> 移動 &nbsp;
+  1P: <kbd>&larr;</kbd> <kbd>&rarr;</kbd> 移動 &nbsp;
   <kbd>Z</kbd>/<kbd>Space</kbd> 左の爆雷 &nbsp;
-  <kbd>X</kbd>/<kbd>Enter</kbd> 右の爆雷 &nbsp;
-  <kbd>F2</kbd> 開始 &nbsp; <kbd>Esc</kbd> タイトル &nbsp;
+  <kbd>X</kbd>/<kbd>Enter</kbd> 右の爆雷<br>
+  2P: <kbd>A</kbd> <kbd>D</kbd> 移動 &nbsp;
+  <kbd>T</kbd> 左の爆雷 &nbsp; <kbd>Y</kbd> 右の爆雷<br>
+  <kbd>F2</kbd>/<kbd>1</kbd> 1 人で開始 &nbsp; <kbd>2</kbd> 2 人協力で開始 &nbsp;
+  <kbd>Esc</kbd> タイトル &nbsp;
   <kbd>F3</kbd> 効果音 &nbsp; <kbd>F4</kbd> 音楽
 </div>
 <div id="status">読み込み中…</div>
@@ -52,6 +55,20 @@ const KEYMAP = {
   KeyZ: PAD.BTN1,  Space: PAD.BTN1,
   KeyX: PAD.BTN2,  Enter: PAD.BTN2,
 };
+// The second co-op player, on keys that never overlap the first's so the two
+// can share a keyboard or each have their own (the browser cannot tell two
+// keyboards apart, so separate keys is all it takes).
+const KEYMAP2 = {
+  KeyW: PAD.UP, KeyS: PAD.DOWN, KeyA: PAD.LEFT, KeyD: PAD.RIGHT,
+  KeyT: PAD.BTN1, KeyY: PAD.BTN2,
+};
+const MODE_TITLE = 0, MODE_LOGO = 4;
+// ?stage=N starts every run at stage N, for trying a stage out.
+const START_STAGE = (() => {
+  const q = typeof location !== 'undefined' ? location.search : '';
+  const n = parseInt(new URLSearchParams(q).get('stage'), 10);
+  return n >= 1 && n <= 20 ? n : 0;
+})();
 // Same order as FUN_0040da00 registers them in the original.
 const SOUNDS = ['burn', 'start', 'eneshot', 'item', 'plane', 'drop'];
 
@@ -59,7 +76,13 @@ const cv = document.getElementById('screen');
 const ctx2d = cv.getContext('2d', { alpha: false });
 const statusEl = document.getElementById('status');
 const diagEl = document.getElementById('diag');
-let pad = 0, sfxOn = true, bgmOn = true, ready = false;
+let pad = 0, pad2 = 0, sfxOn = true, bgmOn = true, ready = false;
+
+function start(players) {
+  Module._wd_start(players);
+  if (START_STAGE)
+    Module._wd_stage(START_STAGE);
+}
 
 // --- audio ----------------------------------------------------------------
 // Effects are decoded WAVs played per hit.  Music is synthesised inside the
@@ -157,11 +180,12 @@ var Module = {
     ensurePump();           // in case a gesture already happened
     const w = Module._wd_width(), h = Module._wd_height();
     const img = ctx2d.createImageData(w, h);
-    statusEl.textContent = 'F2 で開始（BGM はゲーム開始から。原作と同じでタイトルは無音）';
+    statusEl.textContent = 'F2 か 1 で 1 人、2 で 2 人協力（BGM はゲーム開始から。原作と同じでタイトルは無音）' +
+      (START_STAGE ? `  ステージ ${START_STAGE} から開始` : '');
 
     // 50ms, the same tick the original arms in FUN_00401cd0.
     setInterval(() => {
-      Module._wd_tick(pad);
+      Module._wd_tick(pad, pad2);
       const p = Module._wd_framebuffer();
       img.data.set(Module.HEAPU8.subarray(p, p + w * h * 4));
       ctx2d.putImageData(img, 0, 0);
@@ -179,7 +203,14 @@ var Module = {
 addEventListener('keydown', e => {
   ensureContext();
   if (!ready) return;
-  if (e.code === 'F2') { Module._wd_start(); e.preventDefault(); return; }
+  if (e.code === 'F2') { start(1); e.preventDefault(); return; }
+  // 1 / 2 only from the attract screens, so a stray press cannot end a run
+  if ((e.code === 'Digit1' || e.code === 'Digit2') &&
+      (Module._wd_mode() === MODE_TITLE || Module._wd_mode() === MODE_LOGO)) {
+    start(e.code === 'Digit2' ? 2 : 1);
+    e.preventDefault();
+    return;
+  }
   if (e.code === 'Escape') { Module._wd_title(); e.preventDefault(); return; }
   if (e.code === 'F3') {
     sfxOn = !sfxOn;
@@ -195,13 +226,17 @@ addEventListener('keydown', e => {
     e.preventDefault();
     return;
   }
-  const bit = KEYMAP[e.code];
+  const bit = KEYMAP[e.code], bit2 = KEYMAP2[e.code];
   if (bit) { pad |= bit; e.preventDefault(); }
+  if (bit2) { pad2 |= bit2; e.preventDefault(); }
 });
 addEventListener('keyup', e => {
-  const bit = KEYMAP[e.code];
+  const bit = KEYMAP[e.code], bit2 = KEYMAP2[e.code];
   if (bit) { pad &= ~bit; e.preventDefault(); }
+  if (bit2) { pad2 &= ~bit2; e.preventDefault(); }
 });
+// A key released while the window is in the background never sends keyup.
+addEventListener('blur', () => { pad = 0; pad2 = 0; });
 cv.addEventListener('mousedown', ensureContext);
 addEventListener('pointerdown', ensureContext);
 </script>

@@ -43,6 +43,12 @@ void vid_pat(Video *v, int x, int y, int pat)
     dar_blit(v->dar, pat, v->px, SCR_W, SCR_W, SCR_H, x + v->ox, y + v->oy);
 }
 
+void vid_pat_remap(Video *v, int x, int y, int pat, const unsigned char *lut)
+{
+    dar_blit_remap(v->dar, pat, v->px, SCR_W, SCR_W, SCR_H,
+                   x + v->ox, y + v->oy, lut);
+}
+
 void vid_pat_wave(Video *v, int x, int y, int pat, int wave, int amp, int phase)
 {
     int dx[SCR_H];

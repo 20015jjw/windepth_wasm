@@ -160,6 +160,7 @@ typedef struct {
     int x0;               /* where pattern column 0 lands */
     int clip_lo, clip_hi; /* inclusive-exclusive destination window */
     int trans;
+    const unsigned char *lut;  /* palette remap, or NULL */
 } BlitCtx;
 
 static void blit_span(void *vctx, int sx, int len, const unsigned char *px)
@@ -176,7 +177,13 @@ static void blit_span(void *vctx, int sx, int len, const unsigned char *px)
         len = c->clip_hi - cx;
     if (len <= i)
         return;
-    if (c->trans < 0) {
+    if (c->lut) {
+        unsigned char *out = c->row + cx;
+
+        for (; i < len; i++)
+            if ((int)px[i] != c->trans)
+                out[i] = c->lut[px[i]];
+    } else if (c->trans < 0) {
         memcpy(c->row + cx + i, px + i, (size_t)(len - i));
     } else {
         unsigned char tr = (unsigned char)c->trans;
@@ -188,8 +195,8 @@ static void blit_span(void *vctx, int sx, int len, const unsigned char *px)
     }
 }
 
-void dar_blit(const Dar *d, int id, unsigned char *dst, int dpitch,
-              int dw, int dh, int x, int y)
+void dar_blit_remap(const Dar *d, int id, unsigned char *dst, int dpitch,
+                    int dw, int dh, int x, int y, const unsigned char *lut)
 {
     const DarPat *p;
     int row;
@@ -208,8 +215,15 @@ void dar_blit(const Dar *d, int id, unsigned char *dst, int dpitch,
         c.clip_lo = 0;
         c.clip_hi = dw;
         c.trans = p->trans;
+        c.lut = lut;
         row_spans(p, row, blit_span, &c);
     }
+}
+
+void dar_blit(const Dar *d, int id, unsigned char *dst, int dpitch,
+              int dw, int dh, int x, int y)
+{
+    dar_blit_remap(d, id, dst, dpitch, dw, dh, x, y, NULL);
 }
 
 void dar_blit_rowshift(const Dar *d, int id, unsigned char *dst, int dpitch,
@@ -232,6 +246,7 @@ void dar_blit_rowshift(const Dar *d, int id, unsigned char *dst, int dpitch,
         c.clip_lo = 0;
         c.clip_hi = dw;
         c.trans = p->trans;
+        c.lut = NULL;
         row_spans(p, row, blit_span, &c);
     }
 }

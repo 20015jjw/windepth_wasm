@@ -31,6 +31,7 @@ void vid_dirty(Video *v, int x, int y, int w, int h);
 void vid_dirty_all(Video *v);
 
 void vid_pat(Video *v, int x, int y, int pat);
+void vid_pat_remap(Video *v, int x, int y, int pat, const unsigned char *lut);
 
 /* Per-scanline sine displacement, the title screen's water ripple
  * (FUN_0040ea10).  `wave` is the original's wavelength argument: its magnitude

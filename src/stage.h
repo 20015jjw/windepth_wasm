@@ -11,7 +11,7 @@
 #ifndef STAGE_H
 #define STAGE_H
 
-#define MAX_CHAL 60
+#define MAX_CHAL 120     /* the original's file never goes past 50 */
 
 enum { ST_NONE = 0, ST_NORMAL = 1, ST_CHALLENGE = 2, ST_BOSS = 3 };
 

@@ -20,10 +20,35 @@ MCI 経由で Windows のシンセに投げ、WASM 版は**自前の MIDI シン
 ←/→ (H/L)     駆逐艦を左右に
 Z / Space     左の爆雷投下
 X / Enter     右の爆雷投下
-F2            ゲーム開始
+F2 / 1        ゲーム開始（1 人）
+2             2 人協力で開始（タイトル画面から）
 Esc           タイトルへ
 F3 / F4       効果音 / 音楽の ON-OFF
+
+2P: A / D     駆逐艦を左右に
+    T / Y     左 / 右の爆雷投下
 ```
+
+## 2 人協力プレイ（原作にない追加）
+
+タイトルで `2` を押すと 2 人協力で始まります。2P のキーは 1P と 1 つも重ならないので、
+1 台のキーボードを分け合っても、キーボードを 2 台つないでも遊べます
+（ブラウザはキーボードを区別しませんが、キーが別なので問題ありません）。
+
+* 2P の駆逐艦は赤茶色。画面上部に各自の残り爆雷（`1P ####` / `2P ####`）が出ます。
+* **残機は 2 人で共有の 6 機**。沈んだ艦だけが少し休んで、点滅（無敵）しながら戻ります。
+  1 人プレイと違って画面はリセットされません。共有残機が 0 で沈むとその人は脱落、
+  2 人とも脱落でゲームオーバー。得点も共有です。
+* 通常面は同時に出る敵の上限が 1.5 倍（最大 33）、ボスの耐久は 25 → 38。
+  ボスの攻撃パターンが変わる耐久の境目も同じ割合で動きます。
+* チャレンジ面は `data/windepth2p.dat` の 2 人用の版を使います。片側から来る編隊には
+  反対側から鏡写しの編隊が加わり（斜めの列は X に、横一列は 2 車線に）、遅い敵は少し速く。
+  **全滅させると PERFECT ボーナス 10000 点**。ファイルの先頭に書式と制限を書いてあります。
+* ハイスコア表は 1 人用とは別。タイトル画面では 2 人プレイの後から交互に表示します。
+* `index.html?stage=15` のように付けると、どのゲームもその面から始まります（調整用）。
+
+1 人プレイは原作のままです。変更の前後で `frames` の 1 人プレイの出力（PNG と状態遷移）が
+バイト単位で一致することを確認しています。
 
 ## 何をどう作ったか
 
@@ -44,7 +69,7 @@ F3 / F4       効果音 / 音楽の ON-OFF
 | `src/dar.c` `src/dar.h` | DAR 書庫の解析とスプライト描画 |
 | `src/video.c` `src/video.h` | 512×384 8bpp サーフェス、ダーティ矩形、フォント、波紋描画 |
 | `src/stage.c` `src/stage.h` | `windepth.dat` パーサ |
-| `src/game.c` `src/game.h` | ゲーム本体（自機・敵・爆雷・ボス・アイテム・得点） |
+| `src/game.c` `src/game.h` | ゲーム本体（自機・敵・爆雷・ボス・アイテム・得点・2 人協力） |
 | `src/patterns.h` | DAR のパターン番号 |
 | `src/sintab.h` | 原作 `0x00421b18` の sin テーブル（波紋用、実物をそのまま） |
 | `src/smf.c` `src/smf.h` | 標準 MIDI ファイルのパーサ（トラックを 1 本にマージ） |
@@ -84,6 +109,10 @@ sh tools/build_tests.sh
 ./tests/frames.exe tests/out/a 400,800 --start 130 --auto
 ./tests/frames.exe tests/out/c 260     --start 130 --stage 3  --auto   # チャレンジ面
 ./tests/frames.exe tests/out/b 500     --start 130 --stage 19 --auto   # ボス面
+./tests/frames.exe tests/out/p 400     --start 130 --stage 3 --auto --players 2   # 2 人協力
+
+# 2 人用チャレンジ面が敵の枠 33 に収まっているか（同時に生きている敵の最大数）
+./tests/frames.exe tests/out/x 2000    --start 130 --stage 15 --players 2 --live
 
 # 状態遷移だけ見る（ロゴ→タイトル→プレイ→ゲームオーバー→ロゴ）
 ./tests/frames.exe tests/out/z 3000 --start 130 --auto --trace
@@ -121,6 +150,7 @@ GDI の経路を確認する時だけ使うもので、普段の検証には不�
 | `windepth.dar` | `Windepth.exe` のリソース `DAR/WIND_DAR` (278,268 B、329 パターン) |
 | `*.wav` | リソース `WAVE/BURN` `START` `ENESHOT` `ITEM` `PLANE` `DROP` |
 | `windepth.dat` | 配布物のステージ表（テキスト、無改変） |
+| `windepth2p.dat` | 2 人協力用のチャレンジ面（この移植で追加。原作のものではない） |
 | `Windepth.mid` `NAMEINN.MID` | 配布物の BGM。ネイティブ版は MCI、WASM 版は `src/synth.c` で合成 |
 
 ## 権利について

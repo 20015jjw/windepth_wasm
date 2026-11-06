@@ -102,19 +102,31 @@ EMSCRIPTEN_KEEPALIVE int wd_height(void) { return SCR_H; }
 EMSCRIPTEN_KEEPALIVE unsigned char *wd_framebuffer(void) { return g_rgba; }
 
 /* The page owns the clock: it calls this every 50ms, matching the original's
- * timer, then draws whatever wd_framebuffer() points at. */
-EMSCRIPTEN_KEEPALIVE void wd_tick(unsigned pad)
+ * timer, then draws whatever wd_framebuffer() points at.  `pad2` is the second
+ * co-op player; solo it only counts on the name entry screen. */
+EMSCRIPTEN_KEEPALIVE void wd_tick(unsigned pad, unsigned pad2)
 {
     if (!g_ready)
         return;
     g_game.pad = pad;
+    g_game.pad2 = pad2;
     game_tick(&g_game);
     g_vid.ndirty = 0;
     g_vid.full = 0;
     expand();
 }
 
-EMSCRIPTEN_KEEPALIVE void wd_start(void)     { if (g_ready) game_start(&g_game); }
+/* players: 2 for co-op, anything else is solo */
+EMSCRIPTEN_KEEPALIVE void wd_start(int players) { if (g_ready) game_start(&g_game, players); }
+
+/* Jump the run in progress to another stage - the page's ?stage=N, for trying
+ * a stage out without playing up to it. */
+EMSCRIPTEN_KEEPALIVE void wd_stage(int no)
+{
+    if (g_ready && g_game.mode == MODE_PLAY && no >= 1 && no <= 20)
+        game_stage(&g_game, no);
+}
+
 EMSCRIPTEN_KEEPALIVE void wd_title(void)     { if (g_ready) game_title(&g_game); }
 EMSCRIPTEN_KEEPALIVE int  wd_mode(void)      { return g_game.mode; }
 EMSCRIPTEN_KEEPALIVE unsigned wd_score(void) { return g_game.score; }

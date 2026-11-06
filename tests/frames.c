@@ -2,7 +2,7 @@
  * the port can be eyeballed without opening a window.
  *
  *   frames <out-prefix> <tick>[,<tick>...] [--start N] [--keys MASK]
- *                       [--stage N] [--seed N]
+ *                       [--stage N] [--seed N] [--players 2] [--live]
  *
  * --trace prints every mode/state transition, which is the quickest way to see
  * the attract -> play -> game over -> splash cycle.
@@ -11,7 +11,11 @@
  * then on; --stage jumps straight to a stage so the challenge and boss rounds
  * can be reached without playing through; --auto drives a crude autopilot that
  * sweeps left and right and drops a charge every few frames, which is enough
- * to exercise kills, chains, items and the plane.
+ * to exercise kills, chains, items and the plane.  With --players 2 it starts
+ * a co-op run and drives the second ship too, mirrored.
+ *
+ * --live prints the most enemies alive at once over the run, which is how the
+ * co-op challenge scripts are checked against the 33 enemy slots.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +38,7 @@ int main(int argc, char **argv)
     Game game;
     int want[64], nwant = 0, maxtick = 0, i, t;
     int startat = -1, stage = 0, seed = 1, autoplay = 0, trace = 0;
+    int players = 1, live = 0, maxlive = 0;
     int lastmode = -1, laststate = -1;
     unsigned keys = 0;
     const char *prefix = argc > 1 ? argv[1] : "frame";
@@ -59,6 +64,10 @@ int main(int argc, char **argv)
             autoplay = 1;
         else if (!strcmp(argv[i], "--trace"))
             trace = 1;
+        else if (!strcmp(argv[i], "--players") && i + 1 < argc)
+            players = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--live"))
+            live = 1;
     }
     for (i = 0; i < nwant; i++)
         if (want[i] > maxtick)
@@ -74,10 +83,9 @@ int main(int argc, char **argv)
 
     for (t = 1; t <= maxtick; t++) {
         if (t == startat) {
-            game_start(&game);
+            game_start(&game, players);
             if (stage > 0) {
-                game.stageno = stage;
-                stage_load(&game.st, "data/windepth.dat", stage);
+                game_stage(&game, stage);
                 printf("stage %d: kind %d norma %d maxnum %d total %d "
                        "thr %d,%d,%d,%d,%d nchal %d\n",
                        stage, game.st.kind, game.st.norma, game.st.maxnum,
@@ -95,10 +103,19 @@ int main(int argc, char **argv)
                 game.pad |= PAD_BTN1;
             if ((t / 5) % 2 == 0)
                 game.pad |= PAD_BTN2;
+            if (players == 2) {
+                game.pad2 = phase < 120 ? PAD_LEFT : PAD_RIGHT;
+                if ((t / 4) % 2 == 0)
+                    game.pad2 |= PAD_BTN1;
+                if ((t / 3) % 2 == 0)
+                    game.pad2 |= PAD_BTN2;
+            }
         } else {
             game.pad = (startat >= 0 && t > startat) ? keys : 0;
         }
         game_tick(&game);
+        if (game.mode == MODE_PLAY && game.live_enemies > maxlive)
+            maxlive = game.live_enemies;
         if (trace && (game.mode != lastmode || game.pstate != laststate)) {
             printf("t=%-5d mode %d -> %d, pstate %d -> %d  stage=%d score=%u\n",
                    t, lastmode, game.mode, laststate, game.pstate,
@@ -119,6 +136,10 @@ int main(int argc, char **argv)
                        game.boss.hp, game.score, path);
             }
     }
+    if (live)
+        printf("most enemies alive at once: %d (of %d slots); challenge "
+               "script %d, sunk %d\n", maxlive, MAX_ENEMY, game.chal_total,
+               game.chal_kills);
     dar_free(&dar);
     return 0;
 }

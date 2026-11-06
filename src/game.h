@@ -30,9 +30,11 @@ enum { PS_NONE = 0, PS_PLAY = 1, PS_RESPAWN = 2, PS_GAMEOVER = 3, PS_CLEAR = 5 }
 enum { SND_BURN = 0, SND_START = 1, SND_ENESHOT = 2, SND_ITEM = 3,
        SND_PLANE = 4, SND_DROP = 5 };
 
+#define MAX_SHIPS   2      /* the original has one; the second is co-op */
 #define MAX_ENEMY  33
-#define MAX_BOMB   24
-#define PLAYER_BOMBS 4     /* slots 0..3 are the ship's, the rest the plane's */
+#define PLAYER_BOMBS 4     /* each ship owns four slots, ship 0 first */
+#define PLANE_BOMB0 (MAX_SHIPS * PLAYER_BOMBS)   /* the plane's start here */
+#define MAX_BOMB   (PLANE_BOMB0 + 20)            /* the plane keeps its 20 */
 #define MAX_SHOT   48
 #define MAX_BURN   48
 #define MAX_SPLASH 24
@@ -58,6 +60,23 @@ typedef struct { int frame, x, y; } Splash;            /* +0x5d34, stride 0x0c *
 typedef struct { int t, kind, x, y, vx, vy; } Item;    /* +0x5e54, stride 0x18 */
 typedef struct { int t, x, y, ndig, value, chain; } Popup; /* +0x5eb4, stride 0x18 */
 
+/* A destroyer.  Ship 0 is the original's, and its fields carry the original
+ * offsets; ship 1 only exists in a two-player co-op run.
+ *
+ * `down` and `safe` are co-op only.  Solo, a sinking puts the whole game into
+ * PS_RESPAWN and clears the board, as the original does; with two players that
+ * would punish the partner, so a sunk ship sits out on its own instead and
+ * comes back blinking and briefly untouchable. */
+typedef struct {
+    int in;               /* still in the run: sinking with no lives left in
+                           * the pool puts a co-op player out */
+    int x, y, vx;         /* +0x4d04 +0x4d08 +0x4d0c */
+    int bombs_ready;      /* +0x4d14 */
+    int trig1, trig2;     /* +0x6204 +0x6200 - button release latches */
+    int down;             /* ticks since it sank, 0 = afloat */
+    int safe;             /* ticks of invulnerability left after coming back */
+} Ship;
+
 typedef struct {                    /* +0x425860, stride 0x2c */
     unsigned score;
     int level;
@@ -74,6 +93,7 @@ typedef struct {
     const Dar *dar;
     Stage st;
     char datpath[512];
+    char datpath2p[512];  /* windepth2p.dat: co-op versions of some stages */
 
     int mode;             /* +0x500  */
     int pstate;           /* +0x451c */
@@ -84,17 +104,20 @@ typedef struct {
     int sfx_on;           /* +0x4510 */
     int bgm_on;           /* +0x4514 */
 
-    int px, py, pvx;      /* +0x4d04 +0x4d08 +0x4d0c */
-    int lives;            /* +0x4cec */
-    unsigned score;       /* +0x4cdc - the run's total */
+    Ship ship[MAX_SHIPS];
+    int nships;           /* 1, or 2 for co-op */
+    int lives;            /* +0x4cec - in co-op, the pool both ships draw on */
+    unsigned score;       /* +0x4cdc - the run's total, shared in co-op */
     unsigned stagescore;  /* +0x4ce4 - this stage only, shown on CLEAR */
     unsigned hiscore;     /* +0x4ce0 */
     int maxchain;         /* +0x4cf4 */
     int fallnum;          /* +0x4ce8 */
 
-    int bombs_ready;      /* +0x4d14 */
     int bomb_icon;        /* +0x4d18 - cycles 1..4 for the HUD icon */
     int fish_flag;        /* +0x4554 - 1 = spawn the fish, 2 = spawned */
+    int chal_total;       /* co-op: enemies in this challenge stage's script */
+    int chal_kills;       /*        and how many of them were sunk */
+    unsigned perfect;     /*        the PERFECT bonus awarded, for the overlay */
     int live_enemies;     /* +0x4550 */
 
     int plane, planex, planey, planevx, planetimer;  /* +0x4d1c.. +0x4d30 */
@@ -103,8 +126,8 @@ typedef struct {
     int wavephase;        /* +0x61f0 */
     int logofade;         /* +0x61f4 */
 
-    int trig1, trig2;     /* +0x6204 +0x6200 - button release latches */
-    unsigned pad, padprev;/* +0x6214 +0x6210 */
+    unsigned pad, padprev;/* +0x6214 +0x6210 - player 1, and the menus */
+    unsigned pad2;        /* player 2, fed in by the host like `pad` */
     int mx, my, mbl, mbr; /* mouse, fed in by the host each tick */
     int mouse_in;
 
@@ -123,7 +146,7 @@ typedef struct {
 
     struct {              /* +0x5760.. */
         int state;        /* 0 = absent, 1..8 = attack patterns, 9 = dying, 10 = dead */
-        int hp;
+        int hp, maxhp;
         int boom;         /* pending hit sparks */
         int x, y;
         int vx, vy, dvy;
@@ -132,6 +155,11 @@ typedef struct {
     } boss;
 
     ScoreEntry top[MAX_SCORES];
+    ScoreEntry top2[MAX_SCORES];  /* co-op runs get a table of their own */
+    int shown2p;          /* the attract screen's table: 0 = solo, 1 = co-op */
+    int played2p;         /* a co-op run has happened, so show its table too */
+
+    unsigned char tint[256];  /* palette remap that colours ship 1 */
 
     unsigned rnd;         /* the MSVC LCG the original uses */
 } Game;
@@ -142,10 +170,11 @@ void wd_music(int which, int on);     /* which: 0 = windepth.mid, 1 = nameinn.mi
 
 void game_init(Game *g, Video *v, const Dar *dar, const char *datpath);
 void game_tick(Game *g);              /* advance one 50ms frame and redraw */
-void game_start(Game *g);             /* menu "Start": begin a run */
+void game_start(Game *g, int players);/* menu "Start": begin a run; 2 = co-op */
 void game_logo(Game *g);              /* the Bio_100% splash, where a finished
                                        * run returns to before the title */
 void game_title(Game *g);             /* the attract screen */
+void game_stage(Game *g, int no);    /* jump the current run to stage `no` */
 int  game_rand(Game *g);
 
 #endif

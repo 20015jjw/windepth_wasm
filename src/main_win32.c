@@ -45,6 +45,15 @@ static const struct { unsigned mask; int vk; } g_keys[] = {
     { 0, 0 }
 };
 
+/* The second co-op player - not in the original.  None of these overlap the
+ * table above, so the two can share a keyboard or plug in one each. */
+static const struct { unsigned mask; int vk; } g_keys2[] = {
+    { PAD_UP,    'W' }, { PAD_DOWN,  'S' },
+    { PAD_LEFT,  'A' }, { PAD_RIGHT, 'D' },
+    { PAD_BTN1,  'T' }, { PAD_BTN2,  'Y' },
+    { 0, 0 }
+};
+
 /* ------------------------------------------------------------------ sound */
 
 /* sndPlaySound wants a file or a WAVE image in memory; the original hands
@@ -196,6 +205,12 @@ static void read_input(void)
         pad |= PAD_ESC;
     g_game.pad = pad;
 
+    pad = 0;
+    for (i = 0; g_keys2[i].mask; i++)
+        if (GetAsyncKeyState(g_keys2[i].vk) & 0x8000)
+            pad |= g_keys2[i].mask;
+    g_game.pad2 = pad;
+
     GetCursorPos(&pt);
     ScreenToClient(g_hwnd, &pt);
     GetClientRect(g_hwnd, &rc);
@@ -244,7 +259,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYDOWN:
         switch (wp) {
         case VK_F2:                 /* the original's Start accelerator */
-            game_start(&g_game);
+            game_start(&g_game, 1);
+            return 0;
+        case '1':                   /* solo / co-op, from the attract screens */
+        case '2':
+            if (g_game.mode == MODE_TITLE || g_game.mode == MODE_LOGO)
+                game_start(&g_game, wp == '2' ? 2 : 1);
             return 0;
         case VK_F3:
             g_game.sfx_on = !g_game.sfx_on;

@@ -77,6 +77,11 @@ void dar_row(const DarPat *p, int row, unsigned char *out);
 void dar_blit(const Dar *d, int id, unsigned char *dst, int dpitch,
               int dw, int dh, int x, int y);
 
+/* As dar_blit, but every opaque pixel goes through `lut` first - how the
+ * second co-op ship gets its own colours out of the one destroyer sprite. */
+void dar_blit_remap(const Dar *d, int id, unsigned char *dst, int dpitch,
+                    int dw, int dh, int x, int y, const unsigned char *lut);
+
 /* As dar_blit, but each row is shifted horizontally by dx[row] - the title
  * screen's water ripple.  `dx` must have at least the pattern's height. */
 void dar_blit_rowshift(const Dar *d, int id, unsigned char *dst, int dpitch,

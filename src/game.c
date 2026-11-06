@@ -43,6 +43,47 @@ static int en_h(const Enemy *e)
     return (e->kind >= 0 && (e->kind < 5 || e->kind == 9)) ? 0x20 : 0;
 }
 
+/* Where a ship starts and comes back: mid-screen solo, as in the original; in
+ * co-op the two sit either side of that. */
+static int ship_home(const Game *g, int i)
+{
+    if (g->nships < 2)
+        return 0xe0;
+    return i ? 0x130 : 0x90;
+}
+
+/* Afloat and in the run, i.e. something enemies aim at and items reach.  Solo
+ * that is always ship 0, sunk or not: the original keeps steering at px right
+ * through the respawn pause. */
+static int ship_up(const Game *g, const Ship *s)
+{
+    return g->nships < 2 || (s->in && !s->down);
+}
+
+/* Can be sunk this frame.  Solo this is just the original's PS_PLAY test. */
+static int ship_open(const Game *g, const Ship *s)
+{
+    return g->pstate == PS_PLAY && s->in && !s->down && !s->safe;
+}
+
+/* The ship something at `x` homes in on: the nearest one afloat. */
+static const Ship *target(const Game *g, int x)
+{
+    const Ship *best = &g->ship[0];
+    int i, bd = -1;
+
+    for (i = 0; i < g->nships; i++) {
+        const Ship *s = &g->ship[i];
+        int d = abs(s->x - x);
+
+        if (ship_up(g, s) && (bd < 0 || d < bd)) {
+            best = s;
+            bd = d;
+        }
+    }
+    return best;
+}
+
 static void sfx(Game *g, int slot)
 {
     if (g->mode == MODE_PLAY && g->sfx_on)
@@ -141,20 +182,39 @@ static void spawn_item(Game *g, int x, int y, int kind)
 }
 
 /* FUN_00402eb0 - the ship is destroyed. */
-static void player_hit(Game *g)
+static void player_hit(Game *g, Ship *s)
 {
-    burn(g, g->px, g->py - 0x10, 1, 0, 1, 1);
-    dirty(g, g->px - 8, g->py, pat_w(g, P_SHIP) + 0x10, pat_h(g, P_SHIP));
-    g->px = 0xe0;
-    g->pvx = 0;
-    if (--g->lives < 0) {
-        g->pstate = PS_GAMEOVER;
-        g->lives = 0;
-        g->stimer = 0;
-    } else {
-        g->stimer = 0;
-        g->pstate = PS_RESPAWN;
+    int i;
+
+    burn(g, s->x, s->y - 0x10, 1, 0, 1, 1);
+    dirty(g, s->x - 8, s->y, pat_w(g, P_SHIP) + 0x10, pat_h(g, P_SHIP));
+    s->x = ship_home(g, (int)(s - g->ship));
+    s->vx = 0;
+    if (g->nships < 2) {
+        if (--g->lives < 0) {
+            g->pstate = PS_GAMEOVER;
+            g->lives = 0;
+            g->stimer = 0;
+        } else {
+            g->stimer = 0;
+            g->pstate = PS_RESPAWN;
+        }
+        return;
     }
+
+    /* co-op: this ship sits out alone, coming back on a life from the shared
+     * pool; with the pool empty it is out, and the run ends with the last one */
+    if (--g->lives < 0) {
+        g->lives = 0;
+        s->in = 0;
+    } else {
+        s->down = 1;
+    }
+    for (i = 0; i < g->nships; i++)
+        if (g->ship[i].in)
+            return;
+    g->pstate = PS_GAMEOVER;
+    g->stimer = 0;
 }
 
 /* FUN_00402f80 - drop every live object.  Called on each state change. */
@@ -173,9 +233,39 @@ static void clear_objects(Game *g)
     g->fish_flag = 0;
 }
 
+/* The co-op PERFECT bonus: every enemy in a challenge stage's script sunk. */
+#define PERFECT_BONUS 10000
+
+/* Co-op plays windepth2p.dat's version of a stage when it has one - the
+ * challenge stages, rewritten for two - and otherwise the original's.  Normal
+ * stages are scaled instead: half as many enemies again on screen at once,
+ * which keeps up with twice the depth charges without making stages longer. */
 static int load_stage(Game *g)
 {
-    return stage_load(&g->st, g->datpath, g->stageno);
+    int r;
+
+    if (g->nships == 2 && stage_load(&g->st, g->datpath2p, g->stageno) == 0)
+        r = 0;
+    else
+        r = stage_load(&g->st, g->datpath, g->stageno);
+    if (g->nships == 2 && g->st.kind == ST_NORMAL) {
+        g->st.maxnum = g->st.maxnum * 3 / 2;
+        if (g->st.maxnum > MAX_ENEMY)
+            g->st.maxnum = MAX_ENEMY;
+    }
+    g->chal_total = g->st.nchal;
+    g->chal_kills = 0;
+    g->perfect = 0;
+    return r;
+}
+
+/* The high-score table in use.  Co-op runs keep their own; the attract
+ * screen shows whichever of the two it is cycling through. */
+static ScoreEntry *board(Game *g)
+{
+    if (g->mode == MODE_TITLE)
+        return g->shown2p ? g->top2 : g->top;
+    return g->nships == 2 ? g->top2 : g->top;
 }
 
 /* ------------------------------------------------------------ background */
@@ -233,8 +323,11 @@ static void num_chain(Game *g, int x, int y, unsigned v, int chain)
 /* FUN_00402b00 - the top-ten table shown on the attract screen. */
 static void draw_scores(Game *g)
 {
+    const ScoreEntry *top = board(g);
     int i, y, alt = 0;
 
+    if (top == g->top2)
+        vid_text(g->v, 0x08, 0x46, "2P", 1);
     vid_text(g->v, 0x20,  0x46, "RANK",   3);
     vid_text(g->v, 0x68,  0x46, "SCORE",  3);
     vid_text(g->v, 0xb0,  0x46, "STAGE",  3);
@@ -243,7 +336,7 @@ static void draw_scores(Game *g)
     vid_text(g->v, 0x1a0, 0x46, "DATE",   3);
 
     for (i = 0, y = 100; y < 0x119 && i < MAX_SCORES; i++, y += 0x14) {
-        const ScoreEntry *e = &g->top[i];
+        const ScoreEntry *e = &top[i];
         char buf[24];
         int bank;
 
@@ -374,6 +467,8 @@ static void kill_enemy(Game *g, Enemy *e, unsigned value, int chain, int hits,
     int w = en_w(e), h = en_h(e);
 
     addscore(g, value);
+    if (g->st.kind == ST_CHALLENGE)
+        g->chal_kills++;
     if (--g->st.norma == g->st.fish_at)
         g->fish_flag = 1;
     burn(g, e->x + w / 2 - 0x20, e->y + h / 2 - 0x20, frame, value, chain, hits);
@@ -417,7 +512,7 @@ static void enemy_fire(Game *g, Enemy *e)
 static void update_enemy(Game *g, int idx)
 {
     Enemy *e = &g->en[idx];
-    int x, y, nx, ny;
+    int x, y, nx, ny, k;
 
     /* --- spawning ------------------------------------------------------ */
     if (g->st.kind == ST_NORMAL && !e->alive && game_rand(g) % 300 == 1 &&
@@ -447,7 +542,7 @@ static void update_enemy(Game *g, int idx)
         }
         if (g->blink) {
             if (e->alive == 2) {
-                int d = cmp(g->px + 0x10, x);
+                int d = cmp(target(g, x)->x + 0x10, x);
                 if (y < 0x78)
                     e->vx += sgn(d * 3 - e->vx);
                 else
@@ -461,16 +556,27 @@ static void update_enemy(Game *g, int idx)
     }
 
     /* --- the enemy runs the ship down ----------------------------------- */
-    if (g->pstate == PS_PLAY &&
-        g->px < en_w(e) - 0x10 + x && x < g->px + 0x30 &&
-        g->py < en_h(e) - 4 + y && y < g->py + 0x1c)
-        player_hit(g);
+    for (k = 0; k < g->nships; k++) {
+        Ship *s = &g->ship[k];
 
-    /* --- kind 4, the swimmer: slows under the ship, sprints when clear --- */
+        if (ship_open(g, s) &&
+            s->x < en_w(e) - 0x10 + x && x < s->x + 0x30 &&
+            s->y < en_h(e) - 4 + y && y < s->y + 0x1c)
+            player_hit(g, s);
+    }
+
+    /* --- kind 4, the swimmer: slows under a ship, sprints when clear ---- */
     if (e->kind == 4 && g->blink && g->st.kind == ST_NORMAL) {
-        int overhead = !(en_w(e) - 8 + x <= g->px || g->px + 0x38 <= x);
-        int target = (e->timer < 2 && overhead) ? 2 : 6;
-        e->vx += sgn(sgn(e->vx) * target - e->vx);
+        int overhead = 0, speed;
+
+        for (k = 0; k < g->nships; k++) {
+            const Ship *s = &g->ship[k];
+
+            if (ship_up(g, s) && !(en_w(e) - 8 + x <= s->x || s->x + 0x38 <= x))
+                overhead = 1;
+        }
+        speed = (e->timer < 2 && overhead) ? 2 : 6;
+        e->vx += sgn(sgn(e->vx) * speed - e->vx);
     }
 
     /* --- kind 9, the fish: bobs toward the depth it was given ----------- */
@@ -522,6 +628,13 @@ static void boss_fire(Game *g, int kind, int x, int y, int vx, int vy)
         }
 }
 
+/* hp < n, for an n written against the original's 25 hp: the attacks change
+ * at the same fraction of its health however tough co-op makes it. */
+static int boss_below(const Game *g, int n)
+{
+    return g->boss.hp * 0x19 < n * g->boss.maxhp;
+}
+
 static void update_boss(Game *g)
 {
     int nx;
@@ -539,7 +652,8 @@ static void update_boss(Game *g)
         g->boss.timer = 0;
         g->boss.gunalt = 0;
         g->boss.interval = 0x23;
-        g->boss.hp = 0x19;
+        g->boss.maxhp = g->nships == 2 ? 38 : 0x19;
+        g->boss.hp = g->boss.maxhp;
         g->boss.boom = 0;
         g->boss.phase = 0;
     }
@@ -551,7 +665,7 @@ static void update_boss(Game *g)
 
     /* off the side: pick the next pass */
     if (nx < -0x9f || nx > 0x21f) {
-        if (g->boss.hp < 0xb && game_rand(g) % 10 < 6) {
+        if (boss_below(g, 0xb) && game_rand(g) % 10 < 6) {
             g->boss.state = 3;
             g->boss.y = 0xc0;
             g->boss.vy = 0;
@@ -560,7 +674,7 @@ static void update_boss(Game *g)
             g->boss.timer = 0;
             g->boss.interval = 500;
             g->boss.phase = 0;
-        } else if (g->boss.hp < 0x15 && game_rand(g) % 10 < 6) {
+        } else if (boss_below(g, 0x15) && game_rand(g) % 10 < 6) {
             g->boss.state = 2;
             g->boss.y = 0x68;
             g->boss.vy = 0;
@@ -669,7 +783,7 @@ static void update_boss(Game *g)
 
 static void update_burns(Game *g)
 {
-    int i, j;
+    int i, j, k;
 
     for (i = 0; i < MAX_BURN; i++) {
         Burn *b = &g->burn[i];
@@ -709,10 +823,14 @@ static void update_burns(Game *g)
             }
             /* The original tests the ship inside this loop, so it only runs
              * while at least one enemy is still alive.  Kept as-is. */
-            if (g->pstate == PS_PLAY &&
-                g->px < bx + 0x28 && bx < g->px + 0x28 &&
-                g->py < by + 0x38 && by < g->py + 0x1c)
-                player_hit(g);
+            for (k = 0; k < g->nships; k++) {
+                Ship *s = &g->ship[k];
+
+                if (ship_open(g, s) &&
+                    s->x < bx + 0x28 && bx < s->x + 0x28 &&
+                    s->y < by + 0x38 && by < s->y + 0x1c)
+                    player_hit(g, s);
+            }
         }
     }
     for (i = 0; i < MAX_BURN; i++)
@@ -726,12 +844,13 @@ static void update_bombs(Game *g)
 {
     int i, j;
 
-    /* animate, and count how many of the ship's four charges are free */
-    g->bombs_ready = 0;
+    /* animate, and count how many of each ship's four charges are free */
+    for (i = 0; i < MAX_SHIPS; i++)
+        g->ship[i].bombs_ready = 0;
     for (i = 0; i < MAX_BOMB; i++) {
         if (!g->bomb[i].frame) {
-            if (i < PLAYER_BOMBS)
-                g->bombs_ready++;
+            if (i < PLANE_BOMB0)
+                g->ship[i / PLAYER_BOMBS].bombs_ready++;
         } else if (g->blink && ++g->bomb[i].frame > 4) {
             g->bomb[i].frame = 1;
         }
@@ -794,7 +913,7 @@ static void update_bombs(Game *g)
 
 static void update_shots(Game *g)
 {
-    int i;
+    int i, k;
 
     for (i = 0; i < MAX_SHOT; i++)
         if (g->shot[i].frame && ++g->shot[i].frame > 3)
@@ -829,7 +948,7 @@ static void update_shots(Game *g)
             if (y < 0xb5 && (g->st.kind != ST_BOSS || y < 0x79))
                 s->vx -= sgn(s->vx);
             else
-                s->vx += cmp(g->px, x - 0x18);
+                s->vx += cmp(target(g, x - 0x18)->x, x - 0x18);
             if (abs(s->vx) > 6)
                 s->vx = sgn(s->vx) * 6;
         }
@@ -840,8 +959,14 @@ static void update_shots(Game *g)
             cx += 8;
             cy += 8;
         }
-        if (g->pstate == PS_PLAY && g->px < cx && cx < g->px + 0x30 &&
-            g->py < cy + 8 && cy < g->py + 0x18) {
+        /* Tested even when the shot left the screen just above, as in the
+         * original.  One shot sinks one ship. */
+        for (k = 0; k < g->nships; k++) {
+            Ship *p = &g->ship[k];
+
+            if (!ship_open(g, p) || !(p->x < cx && cx < p->x + 0x30 &&
+                                      p->y < cy + 8 && cy < p->y + 0x18))
+                continue;
             if (kind == 2)
                 dirty(g, cx, cy, pat_w(g, P_FIRE1), pat_h(g, P_FIRE1) + 0x10);
             else if (kind == 3)
@@ -851,7 +976,8 @@ static void update_shots(Game *g)
                 dirty(g, cx - 6, cy, pat_w(g, P_CRACK1) + 0xc,
                       pat_h(g, P_CRACK1) + 8);
             s->frame = 0;
-            player_hit(g);
+            player_hit(g, p);
+            break;
         }
 
         s->x += s->vx;
@@ -863,7 +989,7 @@ static void update_shots(Game *g)
 
 static void update_items(Game *g)
 {
-    int i;
+    int i, k;
 
     for (i = 0; i < MAX_ITEM; i++) {
         Item *it = &g->item[i];
@@ -882,8 +1008,14 @@ static void update_items(Game *g)
                 continue;
             }
         }
-        if (g->pstate == PS_PLAY && g->px < x + 8 && x < g->px + 0x38 &&
-            g->py < y && y < g->py + 0x18) {
+        for (k = 0; k < g->nships; k++) {
+            const Ship *p = &g->ship[k];
+
+            if (g->pstate == PS_PLAY && ship_up(g, p) &&
+                p->x < x + 8 && x < p->x + 0x38 && p->y < y && y < p->y + 0x18)
+                break;
+        }
+        if (k < g->nships) {               /* either ship can pick it up */
             sfx(g, SND_ITEM);
             dirty(g, x, y, pat_w(g, P_ITEM1), pat_h(g, P_ITEM1) + 8);
             it->t = 0;
@@ -920,7 +1052,7 @@ static void update_plane(Game *g)
     if (++g->planetimer <= 6)
         return;
     g->planetimer = 0;
-    for (k = PLAYER_BOMBS; k < MAX_BOMB; k++)
+    for (k = PLANE_BOMB0; k < MAX_BOMB; k++)
         if (!g->bomb[k].frame) {
             g->bomb[k].x = nx + 0x18;
             g->bomb[k].y = g->planey + 0x10;
@@ -932,63 +1064,76 @@ static void update_plane(Game *g)
 
 /* ---------------------------------------------------------------- player */
 
-static void drop_charge(Game *g, int x)
+static void drop_charge(Game *g, int ship, int x)
 {
     int k;
 
-    for (k = 0; k < PLAYER_BOMBS; k++)
+    for (k = ship * PLAYER_BOMBS; k < (ship + 1) * PLAYER_BOMBS; k++)
         if (!g->bomb[k].frame) {
             sfx(g, SND_DROP);
             g->bomb[k].x = x;
-            g->bomb[k].y = g->py;
+            g->bomb[k].y = g->ship[ship].y;
             g->bomb[k].vy = 3;
             g->bomb[k].frame = 1;
             return;
         }
 }
 
-static void update_player(Game *g)
+static void update_player(Game *g, int i)
 {
+    Ship *s = &g->ship[i];
+    unsigned pad = i ? g->pad2 : g->pad;
     int b1, b2;
 
     if (g->mode != MODE_PLAY ||
-        (g->pstate != PS_PLAY && g->pstate != PS_CLEAR))
+        (g->pstate != PS_PLAY && g->pstate != PS_CLEAR) || !s->in)
         return;
 
-    g->pvx = 0;
-    if (!g->use_mouse) {
-        if (g->pad & PAD_LEFT)
-            g->pvx = -4;
-        if (g->pad & PAD_RIGHT)
-            g->pvx = 4;
-        b1 = (g->pad & PAD_BTN1) != 0;
-        b2 = (g->pad & PAD_BTN2) != 0;
+    /* co-op only: back after the same pause the solo respawn takes */
+    if (s->down) {
+        if (++s->down > 0x14) {
+            s->down = 0;
+            s->safe = 0x28;
+        }
+        return;
+    }
+    if (s->safe)
+        s->safe--;
+
+    s->vx = 0;
+    if (!g->use_mouse || i) {           /* the mouse only ever drives ship 0 */
+        if (pad & PAD_LEFT)
+            s->vx = -4;
+        if (pad & PAD_RIGHT)
+            s->vx = 4;
+        b1 = (pad & PAD_BTN1) != 0;
+        b2 = (pad & PAD_BTN2) != 0;
     } else {
         if (g->mouse_in) {
-            if (g->mx < g->px)
-                g->pvx = -4;
-            else if (g->mx > g->px + 0x40)
-                g->pvx = 4;
+            if (g->mx < s->x)
+                s->vx = -4;
+            else if (g->mx > s->x + 0x40)
+                s->vx = 4;
         }
         b1 = g->mbl;
         b2 = g->mbr;
     }
-    if (g->px + g->pvx < 0 || g->px + g->pvx > 0x1c0)
-        g->pvx = 0;
-    g->px += g->pvx;
+    if (s->x + s->vx < 0 || s->x + s->vx > 0x1c0)
+        s->vx = 0;
+    s->x += s->vx;
 
-    if (g->trig1 && b1) {
-        drop_charge(g, g->px);
-        g->trig1 = 0;
+    if (s->trig1 && b1) {
+        drop_charge(g, i, s->x);
+        s->trig1 = 0;
     }
-    if (g->trig2 && b2) {
-        drop_charge(g, g->px + 0x30);
-        g->trig2 = 0;
+    if (s->trig2 && b2) {
+        drop_charge(g, i, s->x + 0x30);
+        s->trig2 = 0;
     }
     if (!b1)
-        g->trig1 = 1;
+        s->trig1 = 1;
     if (!b2)
-        g->trig2 = 1;
+        s->trig2 = 1;
 }
 
 /* ------------------------------------------------------------- draw pass */
@@ -1060,17 +1205,44 @@ static void draw_objects(Game *g)
 {
     int i;
 
-    /* ship */
-    if (g->mode == MODE_TITLE ||
-        (g->pstate != PS_RESPAWN && g->pstate != PS_GAMEOVER))
-        vid_pat(g->v, g->px, g->py, P_SHIP);
-    dirty(g, g->px - 8, g->py, pat_w(g, P_SHIP) + 0x10, pat_h(g, P_SHIP));
+    /* ships - the second in its own colours, and blinking while it is safe */
+    for (i = 0; i < g->nships; i++) {
+        const Ship *s = &g->ship[i];
 
-    /* the charges the ship still has, as icons beside the HUD */
-    for (i = 0; i < g->bombs_ready; i++)
-        vid_pat(g->v, 0xe0 + i * 0x10, 0x16,
-                P_BOMB1 + bomb_frame[g->bomb_icon]);
-    dirty(g, 0xe0, 0x16, pat_w(g, P_BOMB1) * 4, pat_h(g, P_BOMB1));
+        if ((g->mode == MODE_TITLE ||
+             (g->pstate != PS_RESPAWN && g->pstate != PS_GAMEOVER)) &&
+            s->in && !s->down && (!s->safe || g->blink)) {
+            if (i)
+                vid_pat_remap(g->v, s->x, s->y, P_SHIP, g->tint);
+            else
+                vid_pat(g->v, s->x, s->y, P_SHIP);
+        }
+        dirty(g, s->x - 8, s->y, pat_w(g, P_SHIP) + 0x10, pat_h(g, P_SHIP));
+    }
+
+    /* the charges each ship still has, as icons under the HUD: solo in the
+     * original's spot, in co-op one set per player */
+    if (g->nships < 2) {
+        for (i = 0; i < g->ship[0].bombs_ready; i++)
+            vid_pat(g->v, 0xe0 + i * 0x10, 0x16,
+                    P_BOMB1 + bomb_frame[g->bomb_icon]);
+        dirty(g, 0xe0, 0x16, pat_w(g, P_BOMB1) * 4, pat_h(g, P_BOMB1));
+    } else {
+        int k;
+
+        /* "1P ####" and "2P ####", each over where that ship starts */
+        for (k = 0; k < g->nships; k++) {
+            int x = ship_home(g, k);
+
+            if (!g->ship[k].in)
+                continue;
+            vid_text(g->v, x, 0x16, k ? "2P" : "1P", k ? 3 : 4);
+            for (i = 0; i < g->ship[k].bombs_ready; i++)
+                vid_pat(g->v, x + 0x10 + i * 0x10, 0x16,
+                        P_BOMB1 + bomb_frame[g->bomb_icon]);
+            dirty(g, x + 0x10, 0x16, pat_w(g, P_BOMB1) * 4, pat_h(g, P_BOMB1));
+        }
+    }
 
     if (g->plane) {
         vid_pat(g->v, g->planex, g->planey, P_PLANE);
@@ -1086,7 +1258,7 @@ static void draw_objects(Game *g)
 
     for (i = 0; i < MAX_BOMB; i++) {
         Bomb *b = &g->bomb[i];
-        int base = i < PLAYER_BOMBS ? P_BOMB1 : P_PBOMB1;
+        int base = i < PLANE_BOMB0 ? P_BOMB1 : P_PBOMB1;
 
         if (!b->frame)
             continue;
@@ -1181,6 +1353,7 @@ static void draw_hud(Game *g)
     dirty(g, 0xde, 2, 0x38, 0x10);
     num(g, 0x11c, 2, g->hiscore, "%08lu", 2);
 
+    /* in co-op this is the shared pool */
     vid_pat(g->v, 0x1cc, 2, P_LEFT);
     dirty(g, 0x1cc, 2, 0x20, 0x10);
     num(g, 500, 2, (unsigned)g->lives, "%lu", 2);
@@ -1219,6 +1392,11 @@ static void draw_overlays(Game *g)
             vid_pat(g->v, 0xd4, 0xf0, P_TOTAL);
             dirty(g, 0xd4, 0xf0, 0x28, 0x10);
             num(g, 0x104, 0xf0, g->stagescore, "%lu", 2);
+            if (g->perfect) {
+                vid_text(g->v, 0xc4, 0x108, "PERFECT", 4);
+                dirty(g, 0xc4, 0x108, 0x38, 0x10);
+                num(g, 0x104, 0x108, g->perfect, "%lu", 2);
+            }
         }
     }
     if (g->pstate == PS_GAMEOVER) {
@@ -1257,8 +1435,10 @@ void game_logo(Game *g)
     g->stimer = 0;
     g->stageno = 0;
     clear_objects(g);
+    g->nships = 1;
+    g->ship[0].in = 1;
     g->lives = 0;
-    g->px = 0xe0;
+    g->ship[0].x = 0xe0;
     load_stage(g);
     vid_dirty_all(g->v);
     wd_music(0, BGM_FROM_TITLE ? g->bgm_on : 0);
@@ -1271,6 +1451,9 @@ void game_title(Game *g)
     g->stageno = 0;
     g->cur_entry = -1;
     clear_objects(g);
+    g->nships = 1;
+    g->ship[0].in = 1;
+    g->shown2p = 0;
     g->hiscore = g->top[0].score;
     load_stage(g);
     vid_dirty_all(g->v);
@@ -1280,20 +1463,30 @@ void game_title(Game *g)
     wd_music(0, BGM_FROM_TITLE ? g->bgm_on : 0);
 }
 
-void game_start(Game *g)
+void game_start(Game *g, int players)
 {
+    int i;
+
+    g->nships = players == 2 ? 2 : 1;
+    if (g->nships == 2)
+        g->played2p = 1;
     g->maxchain = 0;
     g->stagescore = 0;
     g->score = 0;
     g->fallnum = 1;
-    g->hiscore = g->top[0].score;
-    g->lives = 4;
+    g->hiscore = (g->nships == 2 ? g->top2 : g->top)[0].score;
+    g->lives = g->nships == 2 ? 6 : 4;
     g->mode = MODE_PLAY;
     g->pstate = PS_PLAY;
     g->stimer = 0;
     g->stageno = 1;
     g->cur_entry = -1;
-    g->px = 0xe0;
+    for (i = 0; i < MAX_SHIPS; i++) {
+        g->ship[i].in = i < g->nships;
+        g->ship[i].x = ship_home(g, i);
+        g->ship[i].down = 0;
+        g->ship[i].safe = 0;
+    }
     clear_objects(g);
     load_stage(g);
     vid_dirty_all(g->v);
@@ -1302,13 +1495,25 @@ void game_start(Game *g)
     wd_music(0, g->bgm_on);
 }
 
+void game_stage(Game *g, int no)
+{
+    g->stageno = no;
+    g->pstate = PS_PLAY;
+    g->stimer = 0;
+    clear_objects(g);
+    load_stage(g);
+    vid_dirty_all(g->v);
+}
+
 /* FUN_00404040 - the run is over and the score made the table. */
 static void enter_name(Game *g)
 {
+    ScoreEntry *top;
     int i = 0, k;
 
     wd_music(1, g->bgm_on);
     g->mode = MODE_NAME;
+    top = board(g);
     g->pstate = PS_PLAY;
     clear_objects(g);
     g->name_done = 0;
@@ -1318,20 +1523,20 @@ static void enter_name(Game *g)
     g->name_len = 0;
     g->name_idx = 0;
 
-    while (i < MAX_SCORES && g->score <= g->top[i].score)
+    while (i < MAX_SCORES && g->score <= top[i].score)
         i++;
     if (i >= MAX_SCORES) {
         g->cur_entry = -1;
         return;
     }
     for (k = MAX_SCORES - 1; k > i; k--)
-        g->top[k] = g->top[k - 1];
-    memset(&g->top[i], 0, sizeof g->top[i]);
-    g->top[i].score = g->score;
-    g->top[i].level = g->stageno;
-    g->top[i].maxhit = g->maxchain;
-    g->top[i].fallnum = g->fallnum;
-    strcpy(g->top[i].date, "00/00/00");
+        top[k] = top[k - 1];
+    memset(&top[i], 0, sizeof top[i]);
+    top[i].score = g->score;
+    top[i].level = g->stageno;
+    top[i].maxhit = g->maxchain;
+    top[i].fallnum = g->fallnum;
+    strcpy(top[i].date, "00/00/00");
     g->cur_entry = i;
     g->name_idx = (i == 0) ? 1 : 0;
 }
@@ -1354,6 +1559,10 @@ static void tick_play_state(Game *g)
         g->live_enemies < 1) {
         g->pstate = PS_CLEAR;
         g->stimer = 0;
+        if (g->nships == 2 && g->chal_kills >= g->chal_total) {
+            g->perfect = PERFECT_BONUS;
+            addscore(g, g->perfect);
+        }
     }
 
     if (g->pstate == PS_RESPAWN) {
@@ -1366,7 +1575,7 @@ static void tick_play_state(Game *g)
     } else if (g->pstate == PS_GAMEOVER) {
         if (g->stimer > 0x50) {
             wd_music(0, 0);
-            if (g->score <= g->top[MAX_SCORES - 1].score)
+            if (g->score <= board(g)[MAX_SCORES - 1].score)
                 game_logo(g);
             else
                 enter_name(g);
@@ -1432,8 +1641,9 @@ static void tick_name(Game *g)
         " !\"#$%&'()*+,-./0123456789:;<=>?",
         "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
     };
-    ScoreEntry *e = (g->cur_entry >= 0) ? &g->top[g->cur_entry] : 0;
-    unsigned newpad = g->pad & ~g->padprev;
+    ScoreEntry *top = board(g);
+    ScoreEntry *e = (g->cur_entry >= 0) ? &top[g->cur_entry] : 0;
+    unsigned newpad = (g->pad | g->pad2) & ~g->padprev;   /* either player */
     int i;
 
     g->blink ^= 1;
@@ -1482,8 +1692,8 @@ static void tick_name(Game *g)
             } else if (c == -2) {
                 /* DUP reaches the row being edited too; copying that onto
                  * itself is a no-op, and an overlapping strncpy is undefined */
-                if (&g->top[g->name_idx] != e)
-                    strncpy(e->name, g->top[g->name_idx].name, sizeof e->name - 1);
+                if (&top[g->name_idx] != e)
+                    strncpy(e->name, top[g->name_idx].name, sizeof e->name - 1);
                 e->name[sizeof e->name - 1] = 0;
                 g->name_len = (int)strlen(e->name);
                 if (++g->name_idx >= MAX_SCORES)
@@ -1544,7 +1754,7 @@ void game_tick(Game *g)
     }
     if (g->mode == MODE_NAME) {
         tick_name(g);
-        g->padprev = g->pad;
+        g->padprev = g->pad | g->pad2;
         return;
     }
 
@@ -1553,21 +1763,24 @@ void game_tick(Game *g)
     if (g->mode == MODE_PLAY) {
         tick_play_state(g);
         if (g->mode != MODE_PLAY) {      /* game over rolled us elsewhere */
-            g->padprev = g->pad;
+            g->padprev = g->pad | g->pad2;
             return;
         }
     } else if (g->mode == MODE_TITLE) {
         if (g->stimer > 0x78) {
             g->stimer = -0x78;
+            if (g->played2p)            /* take turns with the co-op table */
+                g->shown2p ^= 1;
             vid_dirty_all(g->v);
         }
         if (g->stimer == 1)
             vid_dirty_all(g->v);
     }
 
-    g->padprev = g->pad;
+    g->padprev = g->pad | g->pad2;
 
-    update_player(g);
+    for (i = 0; i < g->nships; i++)
+        update_player(g, i);
     update_plane(g);
 
     /* live enemy count, and the two animated kinds */
@@ -1624,6 +1837,49 @@ void game_tick(Game *g)
     draw_frame(g);
 }
 
+/* windepth2p.dat sits next to windepth.dat. */
+static void path_2p(Game *g)
+{
+    char *slash;
+    size_t dir;
+
+    slash = strrchr(g->datpath, '/');
+    if (!slash || (strrchr(g->datpath, '\\') > slash))
+        slash = strrchr(g->datpath, '\\');
+    dir = slash ? (size_t)(slash - g->datpath) + 1 : 0;
+    if (dir + sizeof "windepth2p.dat" > sizeof g->datpath2p)
+        return;
+    memcpy(g->datpath2p, g->datpath, dir);
+    strcpy(g->datpath2p + dir, "windepth2p.dat");
+}
+
+/* Ship 1's colours.  The destroyer is drawn in greys only, so take each
+ * entry's brightness, tint it rust red, and use the nearest colour the DAR
+ * palette has.  Worked out from the palette rather than tabled. */
+static void make_tint(Game *g)
+{
+    int i, j;
+
+    for (i = 0; i < 256; i++) {
+        const unsigned char *c = g->dar->pal[i];
+        int l = (c[0] * 30 + c[1] * 59 + c[2] * 11) / 100;
+        int r = l, gr = l * 45 / 100, b = l * 35 / 100;
+        int best = i, bd = -1;
+
+        for (j = 0; j < 256; j++) {
+            const unsigned char *p = g->dar->pal[j];
+            int dr = p[0] - r, dg = p[1] - gr, db = p[2] - b;
+            int d = dr * dr * 3 + dg * dg * 4 + db * db * 2;
+
+            if (bd < 0 || d < bd) {
+                bd = d;
+                best = j;
+            }
+        }
+        g->tint[i] = (unsigned char)best;
+    }
+}
+
 void game_init(Game *g, Video *v, const Dar *dar, const char *datpath)
 {
     int i;
@@ -1632,14 +1888,20 @@ void game_init(Game *g, Video *v, const Dar *dar, const char *datpath)
     g->v = v;
     g->dar = dar;
     strncpy(g->datpath, datpath, sizeof g->datpath - 1);
+    path_2p(g);
+    make_tint(g);
     g->rnd = 1;
     g->sfx_on = 1;
     g->bgm_on = 1;
     g->use_mouse = 0;
-    g->py = 0x26;
-    g->px = 0xe0;
+    for (i = 0; i < MAX_SHIPS; i++) {
+        g->ship[i].y = 0x26;
+        g->ship[i].trig1 = g->ship[i].trig2 = 1;
+    }
+    g->nships = 1;
+    g->ship[0].in = 1;
+    g->ship[0].x = 0xe0;
     g->bomb_icon = 1;
-    g->trig1 = g->trig2 = 1;
     g->cur_entry = -1;
     g->logofade = 0x28;
 
@@ -1654,6 +1916,7 @@ void game_init(Game *g, Video *v, const Dar *dar, const char *datpath)
         strcpy(g->top[i].name, "BIO_100%");
         strcpy(g->top[i].date, "97/09/28");
     }
+    memcpy(g->top2, g->top, sizeof g->top2);
     g->hiscore = g->top[0].score;
 
     /* The original's app constructor ends by calling FUN_00403d80, so start

@@ -1480,7 +1480,10 @@ static void tick_name(Game *g)
                 if (g->name_len > 0)
                     e->name[--g->name_len] = 0;
             } else if (c == -2) {
-                strncpy(e->name, g->top[g->name_idx].name, sizeof e->name - 1);
+                /* DUP reaches the row being edited too; copying that onto
+                 * itself is a no-op, and an overlapping strncpy is undefined */
+                if (&g->top[g->name_idx] != e)
+                    strncpy(e->name, g->top[g->name_idx].name, sizeof e->name - 1);
                 e->name[sizeof e->name - 1] = 0;
                 g->name_len = (int)strlen(e->name);
                 if (++g->name_idx >= MAX_SCORES)

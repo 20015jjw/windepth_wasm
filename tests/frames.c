@@ -3,6 +3,7 @@
  *
  *   frames <out-prefix> <tick>[,<tick>...] [--start N] [--keys MASK]
  *                       [--stage N] [--seed N] [--players 2] [--live]
+ *                       [--rate K] [--replay]
  *
  * --trace prints every mode/state transition, which is the quickest way to see
  * the attract -> play -> game over -> splash cycle.
@@ -16,6 +17,14 @@
  *
  * --live prints the most enemies alive at once over the run, which is how the
  * co-op challenge scripts are checked against the 33 enemy slots.
+ *
+ * --rate K runs the logic K times per original tick, as the browser's modern
+ * mode does.  Tick numbers stay in original 50ms ticks: tick N is after N*K
+ * calls, and the pad changes only on whole ticks.
+ *
+ * --replay also records every draw (as the browser's WebGL path gets them)
+ * and, after every call, redraws the frame from that record alone; it must
+ * come out pixel for pixel what the rasteriser drew.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +40,36 @@ extern void png_indexed(const char *path, int w, int h, const unsigned char *px,
 void wd_sound(int slot, int loop) { (void)slot; (void)loop; }
 void wd_music(int which, int on)  { (void)which; (void)on; }
 
+static int floor256(int v) { return v >= 0 ? v / 256 : -((-v + 255) / 256); }
+
+/* Redraw a recorded frame the way a renderer of the record would, at whole
+ * pixels. */
+static void replay(const Dar *d, const Video *v, const unsigned char *tint,
+                   unsigned char *out)
+{
+    unsigned char row[1024];
+    int i, k;
+
+    for (i = 0; i < v->ncmd; i++) {
+        const VidCmd *c = &v->cmd[i];
+        int x = floor256(c->x), y = floor256(c->y);
+
+        if (c->flags & VC_ROW) {
+            const DarPat *p = &d->pat[c->pat];
+
+            if (y < 0 || y >= SCR_H)
+                continue;
+            dar_row(p, c->flags >> 8, row);
+            for (k = 0; k < p->w; k++)
+                if ((int)row[k] != p->trans && x + k >= 0 && x + k < SCR_W)
+                    out[y * SCR_W + x + k] = row[k];
+        } else {
+            dar_blit_remap(d, c->pat, out, SCR_W, SCR_W, SCR_H, x, y,
+                           (c->flags & VC_TINT) ? tint : NULL);
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     Dar dar;
@@ -38,7 +77,9 @@ int main(int argc, char **argv)
     Game game;
     int want[64], nwant = 0, maxtick = 0, i, t;
     int startat = -1, stage = 0, seed = 1, autoplay = 0, trace = 0;
-    int players = 1, live = 0, maxlive = 0;
+    int players = 1, live = 0, maxlive = 0, rate = 1, f, check = 0;
+    long replays = 0;
+    static unsigned char again[SCR_W * SCR_H];
     int lastmode = -1, laststate = -1;
     unsigned keys = 0;
     const char *prefix = argc > 1 ? argv[1] : "frame";
@@ -68,6 +109,10 @@ int main(int argc, char **argv)
             players = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--live"))
             live = 1;
+        else if (!strcmp(argv[i], "--rate") && i + 1 < argc)
+            rate = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--replay"))
+            check = 1;
     }
     for (i = 0; i < nwant; i++)
         if (want[i] > maxtick)
@@ -80,6 +125,8 @@ int main(int argc, char **argv)
     vid_init(&vid, &dar);
     game_init(&game, &vid, &dar, "data/windepth.dat");
     game.rnd = (unsigned)seed;
+    game_set_rate(&game, rate);
+    vid.record = check;
 
     for (t = 1; t <= maxtick; t++) {
         if (t == startat) {
@@ -113,7 +160,18 @@ int main(int argc, char **argv)
         } else {
             game.pad = (startat >= 0 && t > startat) ? keys : 0;
         }
-        game_tick(&game);
+        for (f = 0; f < rate; f++) {
+            vid.ncmd = 0;
+            game_tick(&game);
+            if (!check || vid.ncmd == 0)    /* nothing drawn: frame stands */
+                continue;
+            replay(&dar, &vid, game.tint, again);
+            replays++;
+            if (memcmp(again, vid.px, sizeof again)) {
+                fprintf(stderr, "replay differs at tick %d.%d\n", t, f);
+                return 1;
+            }
+        }
         if (game.mode == MODE_PLAY && game.live_enemies > maxlive)
             maxlive = game.live_enemies;
         if (trace && (game.mode != lastmode || game.pstate != laststate)) {
@@ -136,6 +194,9 @@ int main(int argc, char **argv)
                        game.boss.hp, game.score, path);
             }
     }
+    if (check)
+        printf("replay: %ld frames redrawn from the record, all identical\n",
+               replays);
     if (live)
         printf("most enemies alive at once: %d (of %d slots); challenge "
                "script %d, sunk %d\n", maxlive, MAX_ENEMY, game.chal_total,

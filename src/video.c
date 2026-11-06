@@ -12,6 +12,29 @@ void vid_init(Video *v, const Dar *dar)
     memset(v, 0, sizeof *v);
     v->dar = dar;
     v->full = 1;
+    v->raster = 1;
+}
+
+void vid_tag(Video *v, int id, int fx, int fy)
+{
+    v->tag_id = id;
+    v->tag_fx = fx;
+    v->tag_fy = fy;
+}
+
+static void record(Video *v, int x, int y, int pat, int flags)
+{
+    VidCmd *c;
+
+    if (v->ncmd < MAX_CMD) {
+        c = &v->cmd[v->ncmd++];
+        c->pat = pat;
+        c->x = (x + v->ox) * 256 + v->tag_fx;
+        c->y = (y + v->oy) * 256 + v->tag_fy;
+        c->id = v->tag_id;
+        c->flags = flags;
+    }
+    vid_tag(v, 0, 0, 0);
 }
 
 void vid_clear(Video *v, unsigned char index)
@@ -40,13 +63,20 @@ void vid_dirty_all(Video *v)
 
 void vid_pat(Video *v, int x, int y, int pat)
 {
-    dar_blit(v->dar, pat, v->px, SCR_W, SCR_W, SCR_H, x + v->ox, y + v->oy);
+    if (v->raster)
+        dar_blit(v->dar, pat, v->px, SCR_W, SCR_W, SCR_H, x + v->ox, y + v->oy);
+    if (v->record)
+        record(v, x, y, pat, 0);
 }
 
+/* Recorded as VC_TINT: the only remap the game uses is ship 1's. */
 void vid_pat_remap(Video *v, int x, int y, int pat, const unsigned char *lut)
 {
-    dar_blit_remap(v->dar, pat, v->px, SCR_W, SCR_W, SCR_H,
-                   x + v->ox, y + v->oy, lut);
+    if (v->raster)
+        dar_blit_remap(v->dar, pat, v->px, SCR_W, SCR_W, SCR_H,
+                       x + v->ox, y + v->oy, lut);
+    if (v->record)
+        record(v, x, y, pat, VC_TINT);
 }
 
 void vid_pat_wave(Video *v, int x, int y, int pat, int wave, int amp, int phase)
@@ -75,8 +105,12 @@ void vid_pat_wave(Video *v, int x, int y, int pat, int wave, int amp, int phase)
 
         dx[row] = (wd_sin[(phase + row * step) & 0xff] * a) >> 7;
     }
-    dar_blit_rowshift(v->dar, pat, v->px, SCR_W, SCR_W, SCR_H,
-                      x + v->ox, y + v->oy, dx);
+    if (v->raster)
+        dar_blit_rowshift(v->dar, pat, v->px, SCR_W, SCR_W, SCR_H,
+                          x + v->ox, y + v->oy, dx);
+    if (v->record)
+        for (row = 0; row < p->h; row++)
+            record(v, x + dx[row], y + row, pat, VC_ROW | (row << 8));
 }
 
 static int text(Video *v, int x, int y, const char *s, int bank, int adv)

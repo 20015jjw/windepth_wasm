@@ -15,6 +15,12 @@
  *     callback.  A browser has no MIDI output, and the native build's route -
  *     handing the file to the system synthesiser through MCI, which is what the
  *     original did through SMFDRV32.DLL - has no equivalent.
+ *
+ * That is the classic mode.  The page's modern mode instead runs the logic at
+ * 60Hz (game_set_rate) and draws on the GPU: the core records its draws
+ * rather than rasterising them (video.h's VidCmd), and the page renders that
+ * list from a texture atlas of the patterns (atlas.c) at whatever resolution
+ * and refresh rate the screen has.
  */
 #include <emscripten.h>
 #include <stdlib.h>
@@ -24,6 +30,8 @@
 #include "video.h"
 #include "game.h"
 #include "synth.h"
+#include "atlas.h"
+#include "patterns.h"
 
 #define AUDIO_MAX 8192          /* frames per wd_audio call, at most */
 
@@ -32,6 +40,11 @@ static Video g_vid;
 static Game  g_game;
 static unsigned char g_rgba[SCR_W * SCR_H * 4];
 static int g_ready;
+
+static VidCmd g_cmd[MAX_CMD];   /* the last tick that drew anything */
+static int g_ncmd;
+static Atlas g_atlas;
+static int g_modern;
 
 static Music g_mus;
 static float g_al[AUDIO_MAX], g_ar[AUDIO_MAX];
@@ -110,11 +123,63 @@ EMSCRIPTEN_KEEPALIVE void wd_tick(unsigned pad, unsigned pad2)
         return;
     g_game.pad = pad;
     g_game.pad2 = pad2;
+    g_vid.ncmd = 0;
     game_tick(&g_game);
     g_vid.ndirty = 0;
     g_vid.full = 0;
-    expand();
+    if (!g_modern) {
+        expand();
+    } else if (g_vid.ncmd) {        /* a tick that draws nothing keeps the frame */
+        memcpy(g_cmd, g_vid.cmd, sizeof *g_cmd * (size_t)g_vid.ncmd);
+        g_ncmd = g_vid.ncmd;
+    }
 }
+
+/* ---------------------------------------------------------------- modern */
+
+/* Modern: the logic at `rate` ticks per original tick, the draws recorded
+ * instead of rasterised.  Classic: 20Hz and the 8bpp surface, as before. */
+EMSCRIPTEN_KEEPALIVE void wd_set_modern(int on, int rate)
+{
+    g_modern = on ? 1 : 0;
+    g_vid.record = g_modern;
+    g_vid.raster = !g_modern;
+    game_set_rate(&g_game, g_modern ? rate : 1);
+    g_ncmd = 0;
+}
+
+EMSCRIPTEN_KEEPALIVE VidCmd *wd_cmds(void) { return g_cmd; }
+EMSCRIPTEN_KEEPALIVE int     wd_ncmds(void) { return g_ncmd; }
+
+/* Build the atlas at `scale` (1 = as drawn, 2 or 4 = smoothed); the page
+ * uploads it and then frees it, so only one is ever held here.  The rect
+ * table is x, y, w, h in atlas pixels, one row per pattern and a last row
+ * for ship 1's tinted copy. */
+static int g_rects[(400 + 1) * 4];
+
+EMSCRIPTEN_KEEPALIVE int wd_atlas_build(int scale)
+{
+    int i;
+
+    atlas_free(&g_atlas);
+    if (!g_ready || g_dar.count > 400 ||
+        atlas_build(&g_atlas, &g_dar, g_game.tint, P_SHIP, scale) != 0)
+        return -1;
+    for (i = 0; i < g_atlas.n; i++) {
+        g_rects[i * 4 + 0] = g_atlas.r[i].x;
+        g_rects[i * 4 + 1] = g_atlas.r[i].y;
+        g_rects[i * 4 + 2] = g_atlas.r[i].w;
+        g_rects[i * 4 + 3] = g_atlas.r[i].h;
+    }
+    return 0;
+}
+
+EMSCRIPTEN_KEEPALIVE unsigned char *wd_atlas_rgba(void) { return g_atlas.rgba; }
+EMSCRIPTEN_KEEPALIVE int  wd_atlas_w(void)     { return g_atlas.w; }
+EMSCRIPTEN_KEEPALIVE int  wd_atlas_h(void)     { return g_atlas.h; }
+EMSCRIPTEN_KEEPALIVE int  wd_atlas_n(void)     { return g_atlas.n; }
+EMSCRIPTEN_KEEPALIVE int *wd_atlas_rects(void) { return g_rects; }
+EMSCRIPTEN_KEEPALIVE void wd_atlas_free(void)  { atlas_free(&g_atlas); }
 
 /* players: 2 for co-op, anything else is solo */
 EMSCRIPTEN_KEEPALIVE void wd_start(int players) { if (g_ready) game_start(&g_game, players); }

@@ -13,14 +13,15 @@
     padding: 12px 0;
   }
   canvas {
-    /* Software rasterised at 512x384 and scaled by the browser with nearest
-       neighbour, so the 1996 pixels stay pixels.  No WebGL anywhere. */
-    image-rendering: pixelated;
-    width: 1024px; height: 768px;
-    max-width: 100vw; max-height: 72vh;
+    /* As large as fits at 4:3.  WebGL draws it at the screen's own resolution
+       (see the video section); without WebGL2 the 512x384 surface is scaled
+       by the browser instead, nearest neighbour. */
+    width: min(calc(100vw - 24px), calc((100vh - 150px) * 4 / 3));
+    aspect-ratio: 4 / 3;
     background: #000;
     border: 1px solid #2a3239;
   }
+  canvas.flat { image-rendering: pixelated; }
   .keys { opacity: .75; text-align: center; }
   kbd {
     background: #1c2329; border: 1px solid #2f3942; border-radius: 3px;
@@ -40,7 +41,9 @@
   <kbd>T</kbd> 左の爆雷 &nbsp; <kbd>Y</kbd> 右の爆雷<br>
   <kbd>F2</kbd>/<kbd>1</kbd> 1 人で開始 &nbsp; <kbd>2</kbd> 2 人協力で開始 &nbsp;
   <kbd>Esc</kbd> タイトル &nbsp;
-  <kbd>F3</kbd> 効果音 &nbsp; <kbd>F4</kbd> 音楽
+  <kbd>F3</kbd> 効果音 &nbsp; <kbd>F4</kbd> 音楽 &nbsp;
+  <kbd>F8</kbd> 見た目 &nbsp; <kbd>F9</kbd> クラシック / モダン &nbsp;
+  <kbd>F11</kbd> 全画面
 </div>
 <div id="status">読み込み中…</div>
 <div id="diag"></div>
@@ -73,7 +76,6 @@ const START_STAGE = (() => {
 const SOUNDS = ['burn', 'start', 'eneshot', 'item', 'plane', 'drop'];
 
 const cv = document.getElementById('screen');
-const ctx2d = cv.getContext('2d', { alpha: false });
 const statusEl = document.getElementById('status');
 const diagEl = document.getElementById('diag');
 let pad = 0, pad2 = 0, sfxOn = true, bgmOn = true, ready = false;
@@ -163,6 +165,361 @@ function musPump() {
   }
 }
 
+// --- video ------------------------------------------------------------------
+// Classic: the original's 20Hz logic and its 8bpp surface, drawn as one
+// texture.  Modern: the logic at 60Hz - three fine ticks per original tick,
+// see game.h - with the core recording its draws instead of rasterising them
+// (video.h's VidCmd).  Those are drawn here as quads from an atlas of the
+// patterns (src/atlas.c), at the screen's own resolution and refresh rate, so
+// things move between pixels.  On a screen faster than 60Hz, anything the
+// core tagged as an object is also drawn part way between its last two fine
+// ticks.  Modern has three looks: crisp pixels, the patterns smoothed with an
+// xBR filter, and a CRT pass over the crisp frame.
+//
+// Without WebGL2 it falls back to the plain 2D canvas, classic only.
+const RATE = 3;
+const LOOKS = ['crisp', 'smooth', 'crt'];
+const LOOK_NAMES = { crisp: 'くっきり', smooth: 'なめらか (xBR)', crt: 'ブラウン管' };
+const CMD_INTS = 5;          // sizeof(VidCmd) / 4
+const MAX_INST = 4096;       // MAX_CMD
+const FOLLOW = 32;           // px; a bigger jump between ticks is a new object
+
+const gl = cv.getContext('webgl2', { alpha: false, antialias: false,
+                                     depth: false, premultipliedAlpha: true });
+const ctx2d = gl ? null : cv.getContext('2d', { alpha: false });
+const prefs = { modern: true, look: 'crisp' };
+try {
+  Object.assign(prefs, JSON.parse(localStorage.getItem('windepth.video') || '{}'));
+} catch (e) {}
+if (!LOOKS.includes(prefs.look)) prefs.look = 'crisp';
+if (!gl) prefs.modern = false;
+
+let cmdCur = new Int32Array(0), cmdPrev = new Int32Array(0), prevAt = new Map();
+let surfaceDirty = false, frames = 0, fps = 0;
+
+function savePrefs() {
+  try { localStorage.setItem('windepth.video', JSON.stringify(prefs)); } catch (e) {}
+}
+
+const VS_SPRITE = `#version 300 es
+layout(location = 0) in vec2 aCorner;   // the unit quad
+layout(location = 1) in vec4 aDst;      // x, y, w, h in game px
+layout(location = 2) in vec4 aSrc;      // x, y, w, h in texels
+out vec2 vTex;
+flat out vec4 vRect;
+void main() {
+  vTex = aSrc.xy + aCorner * aSrc.zw;
+  vRect = aSrc;
+  vec2 p = aDst.xy + aCorner * aDst.zw;
+  gl_Position = vec4(p / vec2(512.0, 384.0) * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+}`;
+
+// uSharp: square texels at any scale, with a one-screen-pixel blend at their
+// borders so they glide between screen pixels instead of snapping.  Sampling
+// stays inside the pattern's own texels: some patterns are masks laid over
+// others (the title logo over its rippling fire), and blending a mask's edge
+// with the padding would let what is under it show through.
+const FS_SPRITE = `#version 300 es
+precision highp float;
+uniform sampler2D uTex;
+uniform vec2 uTexSize;
+uniform int uSharp;
+in vec2 vTex;
+flat in vec4 vRect;
+out vec4 o;
+void main() {
+  vec2 t = vTex;
+  if (uSharp == 1) {
+    vec2 box = clamp(fwidth(t), 1e-4, 1.0);
+    vec2 s = t - 0.5 * box;
+    t = floor(s) + 0.5 + smoothstep(1.0 - box, vec2(1.0), fract(s));
+  }
+  t = clamp(t, vRect.xy + 0.5, vRect.xy + vRect.zw - 0.5);
+  o = texture(uTex, t / uTexSize);
+}`;
+
+const VS_FULL = `#version 300 es
+out vec2 vUV;
+void main() {
+  vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+  vUV = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);   // y down, like the game
+  gl_Position = vec4(p, 0.0, 1.0);
+}`;
+
+// The CRT: each of the 384 lines is a beam whose height grows with its
+// brightness, blooming into the dark gap between lines; a light horizontal
+// softening, and an aperture grille.  Worked in squared (roughly linear)
+// light so the bright beams bloom rather than smear.  Each beam keeps its
+// line's energy, so the picture is as bright as the crisp one on average.
+//
+// The beams are averaged over each screen pixel's height rather than taken
+// at its centre: a full-screen 1080p canvas gives a line under three screen
+// pixels, and point samples that coarse alias into banding.
+const FS_CRT = `#version 300 es
+precision highp float;
+uniform sampler2D uScene;
+in vec2 vUV;
+out vec4 o;
+vec3 line(float r, float x) {
+  vec3 c = texture(uScene, vec2(x, 1.0 - (clamp(r, 0.0, 383.0) + 0.5) / 384.0)).rgb;
+  return c * c;
+}
+vec3 beam(float d, vec3 c) {
+  float s = mix(0.26, 0.46, max(c.r, max(c.g, c.b)));
+  return c * exp(-0.5 * d * d / (s * s)) / (s * 2.5066);
+}
+void main() {
+  float y = vUV.y * 384.0, py = fwidth(y), dx = 0.3 / 512.0;
+  vec3 c = vec3(0.0);
+  for (int i = 0; i < 4; i++) {
+    float yy = y + (float(i) - 1.5) * 0.25 * py, r = floor(yy), d = yy - r - 0.5;
+    c += beam(d, 0.5 * (line(r, vUV.x - dx) + line(r, vUV.x + dx)))
+       + beam(d + 1.0, line(r - 1.0, vUV.x)) + beam(d - 1.0, line(r + 1.0, vUV.x));
+  }
+  float m = mod(gl_FragCoord.x, 3.0);
+  c *= 0.25 * vec3(m < 1.0 ? 1.0 : 0.85, m >= 1.0 && m < 2.0 ? 1.0 : 0.85,
+                   m >= 2.0 ? 1.0 : 0.85) / 0.9;
+  o = vec4(sqrt(c), 1.0);
+}`;
+
+const V = {};    // GL objects, filled by glSetup()
+
+function glProgram(vs, fs) {
+  const prog = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+      throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(prog, sh);
+  }
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(prog));
+  return prog;
+}
+
+function glTexture(w, h, pixels, filter) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+
+function glSetup() {
+  V.sprite = glProgram(VS_SPRITE, FS_SPRITE);
+  V.crt = glProgram(VS_FULL, FS_CRT);
+  V.uTexSize = gl.getUniformLocation(V.sprite, 'uTexSize');
+  V.uSharp = gl.getUniformLocation(V.sprite, 'uSharp');
+
+  V.vao = gl.createVertexArray();
+  gl.bindVertexArray(V.vao);
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0,0, 1,0, 0,1, 0,1, 1,0, 1,1]),
+                gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  V.inst = new Float32Array(MAX_INST * 8);
+  V.instBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, V.instBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, V.inst.byteLength, gl.DYNAMIC_DRAW);
+  for (let a = 1; a <= 2; a++) {
+    gl.enableVertexAttribArray(a);
+    gl.vertexAttribPointer(a, 4, gl.FLOAT, false, 32, (a - 1) * 16);
+    gl.vertexAttribDivisor(a, 1);
+  }
+  V.empty = gl.createVertexArray();      // the CRT pass needs no attributes
+
+  V.surface = glTexture(512, 384, null, gl.LINEAR);
+  V.atlas = { 1: atlasUpload(1) };
+  // the smoothed atlas is built when first wanted: it is 16x the pixels
+  V.smoothScale = gl.getParameter(gl.MAX_TEXTURE_SIZE) >= 4096 ? 4 : 2;
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // the atlas is premultiplied
+}
+
+function atlasUpload(scale) {
+  if (Module._wd_atlas_build(scale) !== 0)
+    throw new Error('atlas');
+  const w = Module._wd_atlas_w(), h = Module._wd_atlas_h(), n = Module._wd_atlas_n();
+  const p = Module._wd_atlas_rgba(), r = Module._wd_atlas_rects() >> 2;
+  const a = {
+    scale, w, h, n,
+    rects: Module.HEAP32.slice(r, r + n * 4),
+    tex: glTexture(w, h, Module.HEAPU8.subarray(p, p + w * h * 4), gl.LINEAR),
+  };
+  Module._wd_atlas_free();
+  return a;
+}
+
+function atlasFor(look) {
+  if (look !== 'smooth')
+    return V.atlas[1];
+  if (!V.atlas[V.smoothScale])
+    V.atlas[V.smoothScale] = atlasUpload(V.smoothScale);
+  return V.atlas[V.smoothScale];
+}
+
+function setModern(on) {
+  prefs.modern = on;
+  Module._wd_set_modern(on ? 1 : 0, RATE);
+  cmdCur = cmdPrev = new Int32Array(0);
+  prevAt = new Map();
+}
+
+/* One tick of the logic, and whatever it drew. */
+function tickOnce() {
+  Module._wd_tick(pad, pad2);
+  if (!prefs.modern) {
+    surfaceDirty = true;
+    return;
+  }
+  const p = Module._wd_cmds() >> 2, n = Module._wd_ncmds();
+  cmdPrev = cmdCur;
+  cmdCur = Module.HEAP32.slice(p, p + n * CMD_INTS);
+  prevAt = new Map();
+  for (let i = 0; i < cmdPrev.length; i += CMD_INTS)
+    if (cmdPrev[i + 3])
+      prevAt.set(cmdPrev[i + 3], i);
+}
+
+/* The recorded draws as instances: where on screen, where in the atlas. */
+function instances(atlas, alpha) {
+  const inst = V.inst, rects = atlas.rects, k = atlas.scale;
+  let n = 0;
+
+  for (let i = 0; i < cmdCur.length && n < MAX_INST; i += CMD_INTS) {
+    const flags = cmdCur[i + 4], id = cmdCur[i + 3];
+    const r = ((flags & 1) ? atlas.n - 1 : cmdCur[i]) * 4;
+    let x = cmdCur[i + 1] / 256, y = cmdCur[i + 2] / 256;
+
+    if (id && prevAt.has(id) && alpha < 1) {
+      const j = prevAt.get(id), px = cmdPrev[j + 1] / 256, py = cmdPrev[j + 2] / 256;
+      if (Math.abs(x - px) < FOLLOW && Math.abs(y - py) < FOLLOW) {
+        x = px + (x - px) * alpha;
+        y = py + (y - py) * alpha;
+      }
+    }
+    const o = n * 8;
+    inst[o] = x; inst[o + 1] = y; inst[o + 2] = rects[r + 2] / k;
+    inst[o + 4] = rects[r]; inst[o + 6] = rects[r + 2];
+    if (flags & 2) {              // one row of a rippled pattern
+      inst[o + 3] = 1;
+      inst[o + 5] = rects[r + 1] + (flags >> 8) * k; inst[o + 7] = k;
+    } else {
+      inst[o + 3] = rects[r + 3] / k;
+      inst[o + 5] = rects[r + 1]; inst[o + 7] = rects[r + 3];
+    }
+    n++;
+  }
+  return n;
+}
+
+function drawSprites(tex, texW, texH, sharp, count) {
+  gl.useProgram(V.sprite);
+  gl.bindVertexArray(V.vao);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform2f(V.uTexSize, texW, texH);
+  gl.uniform1i(V.uSharp, sharp ? 1 : 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, V.instBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, V.inst, 0, count * 8);
+  gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, count);
+}
+
+function sceneTarget(w, h) {
+  if (V.fbo && V.fboW === w && V.fboH === h)
+    return V.fbo;
+  if (V.fbo) {
+    gl.deleteFramebuffer(V.fbo);
+    gl.deleteTexture(V.fboTex);
+  }
+  V.fboTex = glTexture(w, h, null, gl.LINEAR);
+  V.fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, V.fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, V.fboTex, 0);
+  V.fboW = w;
+  V.fboH = h;
+  return V.fbo;
+}
+
+function draw(alpha) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.max(1, Math.round(cv.clientWidth * dpr));
+  const H = Math.max(1, Math.round(cv.clientHeight * dpr));
+  if (cv.width !== W || cv.height !== H) {
+    cv.width = W;
+    cv.height = H;
+  }
+  const s = Math.min(W / 512, H / 384);
+  const vw = Math.round(512 * s), vh = Math.round(384 * s);
+  const vx = (W - vw) >> 1, vy = (H - vh) >> 1;
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  if (!prefs.modern) {
+    if (surfaceDirty) {
+      const p = Module._wd_framebuffer();
+      gl.bindTexture(gl.TEXTURE_2D, V.surface);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 512, 384, gl.RGBA, gl.UNSIGNED_BYTE,
+                       Module.HEAPU8.subarray(p, p + 512 * 384 * 4));
+      surfaceDirty = false;
+    }
+    V.inst.set([0, 0, 512, 384, 0, 0, 512, 384]);
+    gl.viewport(vx, vy, vw, vh);
+    drawSprites(V.surface, 512, 384, true, 1);
+    return;
+  }
+
+  const look = prefs.look, atlas = atlasFor(look), n = instances(atlas, alpha);
+  if (look === 'crt') {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneTarget(vw, vh));
+    gl.viewport(0, 0, vw, vh);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    drawSprites(atlas.tex, atlas.w, atlas.h, true, n);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(vx, vy, vw, vh);
+    gl.useProgram(V.crt);
+    gl.bindVertexArray(V.empty);
+    gl.bindTexture(gl.TEXTURE_2D, V.fboTex);
+    gl.disable(gl.BLEND);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.enable(gl.BLEND);
+  } else {
+    gl.viewport(vx, vy, vw, vh);
+    drawSprites(atlas.tex, atlas.w, atlas.h, look === 'crisp', n);
+  }
+}
+
+/* Fixed steps for the logic, every display frame for the picture. */
+let last = 0, acc = 0;
+function loop(now) {
+  requestAnimationFrame(loop);
+  const step = prefs.modern ? 50 / RATE : 50;
+  acc += Math.min(now - (last || now), 200);
+  last = now;
+  while (acc >= step) {
+    tickOnce();
+    acc -= step;
+  }
+  draw(Math.min(acc / step, 1));
+  frames++;
+}
+
+function videoStatus() {
+  return !gl ? 'クラシック（WebGL2 が使えないため）'
+       : prefs.modern ? `モダン 60Hz・${LOOK_NAMES[prefs.look]}`
+       : 'クラシック 20Hz';
+}
+
 var Module = {
   wdSound(slot) {
     if (!actx || !sfxOn || !audio[slot]) return;
@@ -178,24 +535,37 @@ var Module = {
     }
     ready = true;
     ensurePump();           // in case a gesture already happened
-    const w = Module._wd_width(), h = Module._wd_height();
-    const img = ctx2d.createImageData(w, h);
     statusEl.textContent = 'F2 か 1 で 1 人、2 で 2 人協力（BGM はゲーム開始から。原作と同じでタイトルは無音）' +
       (START_STAGE ? `  ステージ ${START_STAGE} から開始` : '');
 
-    // 50ms, the same tick the original arms in FUN_00401cd0.
-    setInterval(() => {
-      Module._wd_tick(pad, pad2);
-      const p = Module._wd_framebuffer();
-      img.data.set(Module.HEAPU8.subarray(p, p + w * h * 4));
-      ctx2d.putImageData(img, 0, 0);
-    }, 50);
+    if (gl) {
+      glSetup();
+      setModern(prefs.modern);
+      requestAnimationFrame(loop);
+    } else {
+      // 50ms, the same tick the original arms in FUN_00401cd0.
+      const w = Module._wd_width(), h = Module._wd_height();
+      const img = ctx2d.createImageData(w, h);
+      cv.width = w;
+      cv.height = h;
+      cv.className = 'flat';
+      setInterval(() => {
+        Module._wd_tick(pad, pad2);
+        const p = Module._wd_framebuffer();
+        img.data.set(Module.HEAPU8.subarray(p, p + w * h * 4));
+        ctx2d.putImageData(img, 0, 0);
+        frames++;
+      }, 50);
+    }
 
     setInterval(() => {
-      diagEl.textContent = actx
+      fps = frames * 2;
+      frames = 0;
+      diagEl.textContent = (actx
         ? `audio ${actx.state} ${actx.sampleRate}Hz  music blocks ${musBlocks}` +
           `  queued ${Math.max(0, musNext - actx.currentTime).toFixed(2)}s`
-        : 'audio: 未開始（クリックか何かキーを押してください）';
+        : 'audio: 未開始（クリックか何かキーを押してください）') +
+        `  |  ${videoStatus()}  ${fps}fps`;
     }, 500);
   }
 };
@@ -223,6 +593,18 @@ addEventListener('keydown', e => {
     bgmOn = !bgmOn;
     Module._wd_set_bgm(bgmOn ? 1 : 0);
     statusEl.textContent = '音楽 ' + (bgmOn ? 'ON' : 'OFF');
+    e.preventDefault();
+    return;
+  }
+  if ((e.code === 'F8' || e.code === 'F9') && gl) {
+    if (e.code === 'F9')
+      setModern(!prefs.modern);
+    else if (!prefs.modern)
+      setModern(true);
+    else
+      prefs.look = LOOKS[(LOOKS.indexOf(prefs.look) + 1) % LOOKS.length];
+    savePrefs();
+    statusEl.textContent = '画面: ' + videoStatus();
     e.preventDefault();
     return;
   }

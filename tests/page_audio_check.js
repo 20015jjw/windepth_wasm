@@ -82,7 +82,10 @@ const elements = {};
 function stubEl() {
     return new Proxy({ textContent: '', style: {},
                        addEventListener(type, fn) { listeners[type] = fn; },
-                       getContext() {
+                       /* no WebGL here, so the page takes its 2D path */
+                       getContext(type) {
+                           if (type !== '2d')
+                               return null;
                            return {
                                createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
                                putImageData() {}

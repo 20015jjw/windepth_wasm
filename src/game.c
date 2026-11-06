@@ -24,6 +24,37 @@ static int sgn(int v) { return v > 0 ? 1 : (v < 0 ? -1 : 0); }
  * the sign of the difference. */
 static int cmp(int a, int b) { return a == b ? 0 : (a > b ? 1 : -1); }
 
+/* This fine tick's share of a move of `v` per original tick.  The remainder
+ * carries over, so k fine ticks add up to exactly v; it is always 0..k-1, so
+ * the true position is x + rem/k.  At k = 1 this is just v. */
+static int step(const Game *g, int *rem, int v)
+{
+    int t, d;
+
+    if (g->k == 1)
+        return v;
+    t = *rem + v;
+    d = t >= 0 ? t / g->k : -((-t + g->k - 1) / g->k);
+    *rem = t - d * g->k;
+    return d;
+}
+
+/* How far short of this original tick's value a phase that advances by `v`
+ * per tick should be drawn on this fine tick, so it moves smoothly and lands
+ * on the original's value on the last one.  0 at k = 1. */
+static int lag(const Game *g, int v)
+{
+    int j = (g->sub + g->k - 1) % g->k;     /* this fine tick, 0..k-1 */
+
+    return v * (g->k - 1 - j) / g->k;
+}
+
+/* The original's "would the next move leave the screen" tests are only made
+ * on major ticks, a whole step ahead, exactly as the original makes them: a
+ * fine tick can then never cross a line the last test allowed, and things
+ * leave on the same tick they always did.  So at any rate the game differs
+ * from the original only in when collisions land - which is the point. */
+
 static int pat_w(const Game *g, int p) { return g->dar->pat[p].w; }
 static int pat_h(const Game *g, int p) { return g->dar->pat[p].h; }
 
@@ -175,6 +206,7 @@ static void spawn_item(Game *g, int x, int y, int kind)
             g->item[i].y = y;
             g->item[i].vx = 0;
             g->item[i].vy = -2;
+            g->item[i].rx = g->item[i].ry = 0;
             g->item[i].t = 1;
             g->item[i].kind = kind;
             return;
@@ -190,6 +222,7 @@ static void player_hit(Game *g, Ship *s)
     dirty(g, s->x - 8, s->y, pat_w(g, P_SHIP) + 0x10, pat_h(g, P_SHIP));
     s->x = ship_home(g, (int)(s - g->ship));
     s->vx = 0;
+    s->rx = 0;
     if (g->nships < 2) {
         if (--g->lives < 0) {
             g->pstate = PS_GAMEOVER;
@@ -383,6 +416,7 @@ static void spawn_scripted(Game *g, const ChalEnt *c)
     e->nvx = c->nvx;
     e->nvy = c->nvy;
     e->timer = c->chtime;
+    e->rx = e->ry = 0;
     e->alive = 1;
     e->frame = 0;
     g->live_enemies++;
@@ -397,6 +431,7 @@ static void spawn_random(Game *g, Enemy *e)
     e->alive = 1;
     e->frame = 0;
     e->timer = 0;
+    e->rx = e->ry = 0;
 
     r = game_rand(g) % g->st.total;
     for (k = 4; k >= 0; k--)
@@ -452,6 +487,7 @@ static void spawn_fish(Game *g, Enemy *e)
     g->live_enemies++;
     e->alive = 1;
     e->frame = 0;
+    e->rx = e->ry = 0;
     e->kind = 9;
     e->x = (game_rand(g) & 1) == 0 ? 0x200 : -0x20;
     e->vy = 0;
@@ -492,6 +528,7 @@ static void enemy_fire(Game *g, Enemy *e)
         s->x = e->x + 0xc;
         s->y = e->y;
         s->vx = 0;
+        s->rx = s->ry = 0;
         if (e->kind == 4) {
             sfx(g, SND_ENESHOT);
             s->kind = 2;
@@ -515,7 +552,9 @@ static void update_enemy(Game *g, int idx)
     int x, y, nx, ny, k;
 
     /* --- spawning ------------------------------------------------------ */
-    if (g->st.kind == ST_NORMAL && !e->alive && game_rand(g) % 300 == 1 &&
+    if (!g->major) {
+        /* fine ticks only move and collide */
+    } else if (g->st.kind == ST_NORMAL && !e->alive && game_rand(g) % 300 == 1 &&
         g->st.norma > 0 && g->live_enemies < g->st.maxnum) {
         spawn_random(g, e);
     } else if (g->st.kind == ST_NORMAL && !e->alive && g->fish_flag == 1 &&
@@ -529,13 +568,14 @@ static void update_enemy(Game *g, int idx)
     x = e->x;
 
     /* --- scripted velocity change --------------------------------------- */
-    if (g->st.kind == ST_CHALLENGE && e->timer > 0 && --e->timer == 0) {
+    if (g->major && g->st.kind == ST_CHALLENGE && e->timer > 0 &&
+        --e->timer == 0) {
         e->vx = e->nvx;
         e->vy = e->nvy;
     }
 
     /* --- kind 3, the brain: idles, then homes in ------------------------- */
-    if (e->kind == 3 && g->st.kind == ST_NORMAL) {
+    if (g->major && e->kind == 3 && g->st.kind == ST_NORMAL) {
         if (++e->timer > 0x28) {
             e->alive = ((e->alive - 1) ^ 1) + 1;   /* 1 <-> 2 */
             e->timer = 0;
@@ -566,7 +606,7 @@ static void update_enemy(Game *g, int idx)
     }
 
     /* --- kind 4, the swimmer: slows under a ship, sprints when clear ---- */
-    if (e->kind == 4 && g->blink && g->st.kind == ST_NORMAL) {
+    if (g->major && e->kind == 4 && g->blink && g->st.kind == ST_NORMAL) {
         int overhead = 0, speed;
 
         for (k = 0; k < g->nships; k++) {
@@ -580,23 +620,23 @@ static void update_enemy(Game *g, int idx)
     }
 
     /* --- kind 9, the fish: bobs toward the depth it was given ----------- */
-    if (e->kind == 9 && g->st.kind == ST_NORMAL)
+    if (g->major && e->kind == 9 && g->st.kind == ST_NORMAL)
         e->vy += cmp(e->timer, e->y);
 
     /* --- move, or leave the screen -------------------------------------- */
     nx = x + e->vx;
     ny = y + e->vy;
-    if (nx < -0x40 || nx > 0x200 || ny < -0x20 || ny > 0x180) {
+    if (g->major && (nx < -0x40 || nx > 0x200 || ny < -0x20 || ny > 0x180)) {
         int w = (e->kind == 9 || e->kind == 3) ? 0x20 : 0x40;
         dirty(g, x, y, w, 0x20);
         e->alive = 0;
         return;
     }
-    e->y = ny;
-    e->x = nx;
+    e->y = y + step(g, &e->ry, e->vy);
+    e->x = x + step(g, &e->rx, e->vx);
 
     /* --- shooting ------------------------------------------------------- */
-    if (g->mode == MODE_PLAY && g->st.kind != ST_CHALLENGE &&
+    if (g->major && g->mode == MODE_PLAY && g->st.kind != ST_CHALLENGE &&
         e->kind > 0 && e->kind != 3 && e->kind < 9) {
         int fire;
 
@@ -623,6 +663,7 @@ static void boss_fire(Game *g, int kind, int x, int y, int vx, int vy)
             g->shot[i].y = y;
             g->shot[i].vx = vx;
             g->shot[i].vy = vy;
+            g->shot[i].rx = g->shot[i].ry = 0;
             sfx(g, SND_ENESHOT);
             return;
         }
@@ -635,12 +676,11 @@ static int boss_below(const Game *g, int n)
     return g->boss.hp * 0x19 < n * g->boss.maxhp;
 }
 
-static void update_boss(Game *g)
+/* Once per original tick: appear, pick passes and attack patterns, sparks,
+ * and the death throes. */
+static void boss_steer(Game *g)
 {
     int nx;
-
-    if (g->st.kind != ST_BOSS)
-        return;
 
     if (g->boss.state == 0) {
         g->boss.state = 1;
@@ -656,6 +696,7 @@ static void update_boss(Game *g)
         g->boss.hp = g->boss.maxhp;
         g->boss.boom = 0;
         g->boss.phase = 0;
+        g->boss.rx = g->boss.ry = 0;
     }
 
     if (abs(g->boss.vy) > 7)
@@ -747,13 +788,11 @@ static void update_boss(Game *g)
             burn(g, (game_rand(g) & 0x7f) - 0x20 + g->boss.x, by, 1, 0, 1, 1);
         }
     }
+}
 
-    if (g->mode != MODE_TITLE) {
-        g->boss.y += g->boss.vy;
-        g->boss.x += g->boss.vx;
-    }
-
-    /* fire on the interval */
+/* Once per original tick, after the move: fire on the interval. */
+static void boss_guns(Game *g)
+{
     if (++g->boss.timer >= g->boss.interval) {
         int st = g->boss.state, vx = g->boss.vx, bx = g->boss.x;
 
@@ -779,6 +818,20 @@ static void update_boss(Game *g)
     }
 }
 
+static void update_boss(Game *g)
+{
+    if (g->st.kind != ST_BOSS)
+        return;
+    if (g->major)
+        boss_steer(g);
+    if (g->mode != MODE_TITLE) {
+        g->boss.y += step(g, &g->boss.ry, g->boss.vy);
+        g->boss.x += step(g, &g->boss.rx, g->boss.vx);
+    }
+    if (g->major)
+        boss_guns(g);
+}
+
 /* ------------------------------------------------------------ explosions */
 
 static void update_burns(Game *g)
@@ -793,11 +846,13 @@ static void update_burns(Game *g)
             continue;
         bx = b->x;
         by = b->y;
-        if (g->blink)
-            b->frame++;
-        if (b->frame > 8) {
-            dirty(g, bx, by, pat_w(g, P_BURN1 + 7), pat_h(g, P_BURN1 + 7));
-            b->frame = 0;
+        if (g->major) {
+            if (g->blink)
+                b->frame++;
+            if (b->frame > 8) {
+                dirty(g, bx, by, pat_w(g, P_BURN1 + 7), pat_h(g, P_BURN1 + 7));
+                b->frame = 0;
+            }
         }
         if (b->frame <= 1 || b->frame >= 6)
             continue;
@@ -851,7 +906,7 @@ static void update_bombs(Game *g)
         if (!g->bomb[i].frame) {
             if (i < PLANE_BOMB0)
                 g->ship[i / PLAYER_BOMBS].bombs_ready++;
-        } else if (g->blink && ++g->bomb[i].frame > 4) {
+        } else if (g->major && g->blink && ++g->bomb[i].frame > 4) {
             g->bomb[i].frame = 1;
         }
     }
@@ -864,7 +919,7 @@ static void update_bombs(Game *g)
             continue;
         x = b->x;
         y = b->y;
-        if (y + b->vy > 0x180) {
+        if (g->major && y + b->vy > 0x180) {
             dirty(g, x, y - 8, pat_w(g, P_BOMB1), pat_h(g, P_BOMB1) + 8);
             b->frame = 0;
         }
@@ -905,7 +960,7 @@ static void update_bombs(Game *g)
                 b->frame = 0;
             }
         }
-        b->y += b->vy;
+        b->y += step(g, &b->ry, b->vy);
     }
 }
 
@@ -916,7 +971,7 @@ static void update_shots(Game *g)
     int i, k;
 
     for (i = 0; i < MAX_SHOT; i++)
-        if (g->shot[i].frame && ++g->shot[i].frame > 3)
+        if (g->major && g->shot[i].frame && ++g->shot[i].frame > 3)
             g->shot[i].frame = 1;
 
     for (i = 0; i < MAX_SHOT; i++) {
@@ -929,7 +984,10 @@ static void update_shots(Game *g)
         x = s->x;
         y = s->y;
 
-        if ((kind == 0 && s->vy + y < 0x36) || (kind == 1 && s->vy + y < -0x10)) {
+        if (!g->major) {
+            /* leaving is decided on whole ticks */
+        } else if ((kind == 0 && s->vy + y < 0x36) ||
+                   (kind == 1 && s->vy + y < -0x10)) {
             dirty(g, x - 6, y, pat_w(g, P_CRACK1) + 0xc, pat_h(g, P_CRACK1) + 8);
             s->frame = 0;
             if (kind == 0)
@@ -944,7 +1002,7 @@ static void update_shots(Game *g)
         }
 
         /* the missile leans toward the ship while it is still deep */
-        if (kind == 1) {
+        if (g->major && kind == 1) {
             if (y < 0xb5 && (g->st.kind != ST_BOSS || y < 0x79))
                 s->vx -= sgn(s->vx);
             else
@@ -980,8 +1038,8 @@ static void update_shots(Game *g)
             break;
         }
 
-        s->x += s->vx;
-        s->y += s->vy;
+        s->x += step(g, &s->rx, s->vx);
+        s->y += step(g, &s->ry, s->vy);
     }
 }
 
@@ -999,9 +1057,10 @@ static void update_items(Game *g)
             continue;
         y = it->y;
         x = it->x;
-        if (y + it->vy < 0x36) {
+        if (g->major && y + it->vy < 0x36) {
             it->y = y + it->vy;
             it->vy = 0;                 /* parked just under the surface */
+            it->ry = 0;
             if (++it->t > 100) {
                 dirty(g, x, y, pat_w(g, P_ITEM1), pat_h(g, P_ITEM1) + 8);
                 it->t = 0;
@@ -1026,11 +1085,12 @@ static void update_items(Game *g)
                 g->planey = 10;
                 g->planevx = 6;
                 g->planetimer = 0;
+                g->planerx = 0;
             }
             continue;
         }
-        it->x += it->vx;
-        it->y += it->vy;
+        it->x += step(g, &it->rx, it->vx);
+        it->y += step(g, &it->ry, it->vy);
     }
 }
 
@@ -1043,13 +1103,13 @@ static void update_plane(Game *g)
     if (!g->plane)
         return;
     nx = g->planex + g->planevx;
-    if (nx < -0x40 || nx > 0x200) {
+    if (g->major && (nx < -0x40 || nx > 0x200)) {
         dirty(g, g->planex, g->planey, 0x40, 0x20);
         g->plane = 0;
         return;
     }
-    g->planex = nx;
-    if (++g->planetimer <= 6)
+    nx = g->planex += step(g, &g->planerx, g->planevx);
+    if (!g->major || ++g->planetimer <= 6)
         return;
     g->planetimer = 0;
     for (k = PLANE_BOMB0; k < MAX_BOMB; k++)
@@ -1057,6 +1117,7 @@ static void update_plane(Game *g)
             g->bomb[k].x = nx + 0x18;
             g->bomb[k].y = g->planey + 0x10;
             g->bomb[k].vy = 5;
+            g->bomb[k].ry = 0;
             g->bomb[k].frame = 1;
             return;
         }
@@ -1074,6 +1135,7 @@ static void drop_charge(Game *g, int ship, int x)
             g->bomb[k].x = x;
             g->bomb[k].y = g->ship[ship].y;
             g->bomb[k].vy = 3;
+            g->bomb[k].ry = 0;
             g->bomb[k].frame = 1;
             return;
         }
@@ -1083,7 +1145,7 @@ static void update_player(Game *g, int i)
 {
     Ship *s = &g->ship[i];
     unsigned pad = i ? g->pad2 : g->pad;
-    int b1, b2;
+    int b1, b2, d;
 
     if (g->mode != MODE_PLAY ||
         (g->pstate != PS_PLAY && g->pstate != PS_CLEAR) || !s->in)
@@ -1091,13 +1153,13 @@ static void update_player(Game *g, int i)
 
     /* co-op only: back after the same pause the solo respawn takes */
     if (s->down) {
-        if (++s->down > 0x14) {
+        if (g->major && ++s->down > 0x14) {
             s->down = 0;
             s->safe = 0x28;
         }
         return;
     }
-    if (s->safe)
+    if (g->major && s->safe)
         s->safe--;
 
     s->vx = 0;
@@ -1118,9 +1180,13 @@ static void update_player(Game *g, int i)
         b1 = g->mbl;
         b2 = g->mbr;
     }
-    if (s->x + s->vx < 0 || s->x + s->vx > 0x1c0)
+    d = step(g, &s->rx, s->vx);
+    if (s->x + d < 0 || s->x + d > 0x1c0) {
         s->vx = 0;
-    s->x += s->vx;
+        s->rx = 0;
+        d = 0;
+    }
+    s->x += d;
 
     if (s->trig1 && b1) {
         drop_charge(g, i, s->x);
@@ -1137,6 +1203,18 @@ static void update_player(Game *g, int i)
 }
 
 /* ------------------------------------------------------------- draw pass */
+
+/* Object ids for vid_tag: kind in the high byte, slot in the low. */
+enum { TAG_SHIP = 0x100, TAG_PLANE = 0x200, TAG_ENEMY = 0x300,
+       TAG_BOSS = 0x400, TAG_BOMB = 0x500, TAG_SHOT = 0x600,
+       TAG_ITEM = 0x700 };
+
+/* Tag the next draw: which object it is, and where between pixels its fine
+ * tick remainders put it.  Call it right before the draw it is for. */
+static void tag(Game *g, int id, int rx, int ry)
+{
+    vid_tag(g->v, id, rx * 256 / g->k, ry * 256 / g->k);
+}
 
 static void draw_enemy(Game *g, Enemy *e)
 {
@@ -1156,6 +1234,7 @@ static void draw_enemy(Game *g, Enemy *e)
             extra = 0x10; break;
     default: return;
     }
+    tag(g, TAG_ENEMY + (int)(e - g->en), e->rx, e->ry);
     vid_pat(g->v, e->x, e->y, pat);
     if (e->kind == 9)
         dirty(g, e->x - 8, e->y - 8, pat_w(g, sizepat) + 0x10,
@@ -1175,22 +1254,26 @@ static void draw_boss(Game *g)
         g->boss.lastvx = g->boss.vx;
     if (g->boss.lastvx < 0) {
         if (g->boss.x > -0x40) {
+            tag(g, TAG_BOSS, g->boss.rx, g->boss.ry);
             vid_pat(g->v, g->boss.x, g->boss.y, P_BOSS_L1);
             dirty(g, g->boss.x - 0x10, g->boss.y - 8,
                   pat_w(g, P_BOSS_L1) + 0x20, pat_h(g, P_BOSS_L1) + 0x10);
         }
         if (g->boss.x < 0x1c0) {
+            tag(g, TAG_BOSS + 1, g->boss.rx, g->boss.ry);
             vid_pat(g->v, g->boss.x + 0x40, g->boss.y, P_BOSS_L2);
             dirty(g, g->boss.x + 0x30, g->boss.y - 8,
                   pat_w(g, P_BOSS_L2) + 0x20, pat_h(g, P_BOSS_L2) + 0x10);
         }
     } else {
         if (g->boss.x > -0x40) {
+            tag(g, TAG_BOSS, g->boss.rx, g->boss.ry);
             vid_pat(g->v, g->boss.x, g->boss.y, P_BOSS_R2);
             dirty(g, g->boss.x - 0x10, g->boss.y - 8,
                   pat_w(g, P_BOSS_R2) + 0x20, pat_h(g, P_BOSS_R2) + 0x10);
         }
         if (g->boss.x < 0x1c0) {
+            tag(g, TAG_BOSS + 1, g->boss.rx, g->boss.ry);
             vid_pat(g->v, g->boss.x + 0x40, g->boss.y, P_BOSS_R1);
             dirty(g, g->boss.x + 0x30, g->boss.y - 8,
                   pat_w(g, P_BOSS_R1) + 0x20, pat_h(g, P_BOSS_R1) + 0x10);
@@ -1212,6 +1295,7 @@ static void draw_objects(Game *g)
         if ((g->mode == MODE_TITLE ||
              (g->pstate != PS_RESPAWN && g->pstate != PS_GAMEOVER)) &&
             s->in && !s->down && (!s->safe || g->blink)) {
+            tag(g, TAG_SHIP + i, s->rx, 0);
             if (i)
                 vid_pat_remap(g->v, s->x, s->y, P_SHIP, g->tint);
             else
@@ -1245,6 +1329,7 @@ static void draw_objects(Game *g)
     }
 
     if (g->plane) {
+        tag(g, TAG_PLANE, g->planerx, 0);
         vid_pat(g->v, g->planex, g->planey, P_PLANE);
         dirty(g, g->planex - 8, g->planey,
               pat_w(g, P_PLANE) + 0x10, pat_h(g, P_PLANE));
@@ -1262,6 +1347,7 @@ static void draw_objects(Game *g)
 
         if (!b->frame)
             continue;
+        tag(g, TAG_BOMB + i, 0, b->ry);
         vid_pat(g->v, b->x, b->y, base + bomb_frame[b->frame]);
         dirty(g, b->x, b->y - 8, pat_w(g, P_BOMB1), pat_h(g, P_BOMB1) + 8);
     }
@@ -1272,6 +1358,7 @@ static void draw_objects(Game *g)
 
         if (!s->frame)
             continue;
+        tag(g, TAG_SHOT + i, s->rx, s->ry);      /* each branch draws once */
         if (s->kind == 0) {
             vid_pat(g->v, s->x, s->y, P_CRACK1 + s->frame - 1);
             dw = pat_w(g, P_CRACK1);
@@ -1306,8 +1393,10 @@ static void draw_objects(Game *g)
 
         if (!it->t)
             continue;
-        if (it->t < 0x3c || g->blink)
+        if (it->t < 0x3c || g->blink) {
+            tag(g, TAG_ITEM + i, it->rx, it->ry);
             vid_pat(g->v, it->x, it->y, P_ITEM1);
+        }
         dirty(g, it->x, it->y, pat_w(g, P_ITEM1), pat_h(g, P_ITEM1) + 8);
     }
 
@@ -1467,6 +1556,11 @@ void game_start(Game *g, int players)
 {
     int i;
 
+    /* The host calls this between ticks, so the run starts on a whole
+     * original tick.  game_logo and game_title must not do the same: they
+     * also run from inside a tick, and would turn the rest of it into an
+     * extra one. */
+    g->sub = 0;
     g->nships = players == 2 ? 2 : 1;
     if (g->nships == 2)
         g->played2p = 1;
@@ -1497,12 +1591,34 @@ void game_start(Game *g, int players)
 
 void game_stage(Game *g, int no)
 {
+    g->sub = 0;
     g->stageno = no;
     g->pstate = PS_PLAY;
     g->stimer = 0;
     clear_objects(g);
     load_stage(g);
     vid_dirty_all(g->v);
+}
+
+void game_set_rate(Game *g, int k)
+{
+    int i;
+
+    g->k = k < 1 ? 1 : k;
+    g->sub = 0;
+    /* positions are whole pixels at any rate; only the remainders go */
+    for (i = 0; i < MAX_SHIPS; i++)
+        g->ship[i].rx = 0;
+    for (i = 0; i < MAX_ENEMY; i++)
+        g->en[i].rx = g->en[i].ry = 0;
+    for (i = 0; i < MAX_BOMB; i++)
+        g->bomb[i].ry = 0;
+    for (i = 0; i < MAX_SHOT; i++)
+        g->shot[i].rx = g->shot[i].ry = 0;
+    for (i = 0; i < MAX_ITEM; i++)
+        g->item[i].rx = g->item[i].ry = 0;
+    g->planerx = 0;
+    g->boss.rx = g->boss.ry = 0;
 }
 
 /* FUN_00404040 - the run is over and the score made the table. */
@@ -1607,12 +1723,14 @@ static void draw_frame(Game *g)
         if (g->stimer < 1) {
             draw_scores(g);
         } else {
-            vid_pat_wave(g->v, 0x18, 0xa0, P_FIREWALL, 0x40, 4, g->wavephase);
+            vid_pat_wave(g->v, 0x18, 0xa0, P_FIREWALL, 0x40, 4,
+                         g->wavephase - lag(g, 0x10));
             vid_pat(g->v, 0x14, 0xa0, P_WDLOGO);
             dirty(g, 0x14, 0xa0, pat_w(g, P_WDLOGO), pat_h(g, P_WDLOGO));
         }
     }
-    g->wavephase += 0x10;
+    if (g->sub == 0)                 /* the original tick's last */
+        g->wavephase += 0x10;
 }
 
 /* FUN_00403e30 - the Bio_100% splash, a rippling logo that settles. */
@@ -1621,16 +1739,19 @@ static void tick_logo(Game *g)
     int w = pat_w(g, P_BIOLOGO), h = pat_h(g, P_BIOLOGO);
     int x = (SCR_W - w) / 2, y = 0x8c;
 
-    g->blink ^= 1;
-    if (g->stimer > 0x78) {
-        game_title(g);
-        return;
+    if (g->major) {
+        g->blink ^= 1;
+        if (g->stimer > 0x78) {
+            game_title(g);
+            return;
+        }
+        g->wavephase += 8;
+        if (g->blink && g->logofade > 0)
+            g->logofade--;
     }
-    g->wavephase += 8;
-    if (g->blink && g->logofade > 0)
-        g->logofade--;
     draw_logoback(g);
-    vid_pat_wave(g->v, x, y, P_BIOLOGO, -0x40, g->logofade, g->wavephase);
+    vid_pat_wave(g->v, x, y, P_BIOLOGO, -0x40, g->logofade,
+                 g->wavephase - lag(g, 8));
     dirty(g, x - g->logofade, y, g->logofade * 2 + w, h);
 }
 
@@ -1646,8 +1767,9 @@ static void tick_name(Game *g)
     unsigned newpad = (g->pad | g->pad2) & ~g->padprev;   /* either player */
     int i;
 
-    g->blink ^= 1;
-    if (g->name_done) {
+    if (g->major)
+        g->blink ^= 1;
+    if (g->major && g->name_done) {
         g->name_timer -= 0x32;
         if (g->name_timer < 0) {
             wd_music(0, 0);
@@ -1746,7 +1868,18 @@ void game_tick(Game *g)
 {
     int i;
 
-    g->stimer++;
+    g->major = g->sub == 0;
+    if (++g->sub >= g->k)
+        g->sub = 0;
+    if (g->major) {
+        g->stimer++;
+        g->tickmode = g->mode;
+    } else if (g->mode != g->tickmode) {
+        /* The major tick changed modes, which in the original ends the tick
+         * then and there - so the rest of it does nothing, not the new mode's
+         * work early. */
+        return;
+    }
 
     if (g->mode == MODE_LOGO) {
         tick_logo(g);
@@ -1758,23 +1891,24 @@ void game_tick(Game *g)
         return;
     }
 
-    g->blink ^= 1;
-
-    if (g->mode == MODE_PLAY) {
-        tick_play_state(g);
-        if (g->mode != MODE_PLAY) {      /* game over rolled us elsewhere */
-            g->padprev = g->pad | g->pad2;
-            return;
+    if (g->major) {
+        g->blink ^= 1;
+        if (g->mode == MODE_PLAY) {
+            tick_play_state(g);
+            if (g->mode != MODE_PLAY) {  /* game over rolled us elsewhere */
+                g->padprev = g->pad | g->pad2;
+                return;
+            }
+        } else if (g->mode == MODE_TITLE) {
+            if (g->stimer > 0x78) {
+                g->stimer = -0x78;
+                if (g->played2p)        /* take turns with the co-op table */
+                    g->shown2p ^= 1;
+                vid_dirty_all(g->v);
+            }
+            if (g->stimer == 1)
+                vid_dirty_all(g->v);
         }
-    } else if (g->mode == MODE_TITLE) {
-        if (g->stimer > 0x78) {
-            g->stimer = -0x78;
-            if (g->played2p)            /* take turns with the co-op table */
-                g->shown2p ^= 1;
-            vid_dirty_all(g->v);
-        }
-        if (g->stimer == 1)
-            vid_dirty_all(g->v);
     }
 
     g->padprev = g->pad | g->pad2;
@@ -1783,22 +1917,25 @@ void game_tick(Game *g)
         update_player(g, i);
     update_plane(g);
 
-    /* live enemy count, and the two animated kinds */
-    g->live_enemies = 0;
-    for (i = 0; i < MAX_ENEMY; i++) {
-        Enemy *e = &g->en[i];
+    /* live enemy count, and the two animated kinds - on whole ticks only,
+     * since the stage-clear test reads the count the tick before left */
+    if (g->major) {
+        g->live_enemies = 0;
+        for (i = 0; i < MAX_ENEMY; i++) {
+            Enemy *e = &g->en[i];
 
-        if (!e->alive)
-            continue;
-        g->live_enemies++;
-        if (e->kind == 3 && g->blink && ++e->frame > 1)
-            e->frame = 0;
-        if (e->kind == 4 && g->blink && ++e->frame > 2)
-            e->frame = 0;
+            if (!e->alive)
+                continue;
+            g->live_enemies++;
+            if (e->kind == 3 && g->blink && ++e->frame > 1)
+                e->frame = 0;
+            if (e->kind == 4 && g->blink && ++e->frame > 2)
+                e->frame = 0;
+        }
     }
 
     /* scripted spawns fire on an exact frame number */
-    if (g->st.kind == ST_CHALLENGE)
+    if (g->major && g->st.kind == ST_CHALLENGE)
         for (i = 0; i < MAX_CHAL; i++)
             if (g->st.chal[i].time > 0 && g->stimer == g->st.chal[i].time) {
                 spawn_scripted(g, &g->st.chal[i]);
@@ -1813,7 +1950,7 @@ void game_tick(Game *g)
     update_burns(g);
 
     for (i = 0; i < MAX_SPLASH; i++)
-        if (g->spl[i].frame > 0) {
+        if (g->major && g->spl[i].frame > 0) {
             if (g->blink)
                 g->spl[i].frame++;
             if (g->spl[i].frame > 4) {
@@ -1823,7 +1960,7 @@ void game_tick(Game *g)
             }
         }
 
-    if (g->blink && ++g->bomb_icon > 4)
+    if (g->major && g->blink && ++g->bomb_icon > 4)
         g->bomb_icon = 1;
 
     update_bombs(g);
@@ -1831,7 +1968,7 @@ void game_tick(Game *g)
     update_items(g);
 
     for (i = 0; i < MAX_POPUP; i++)
-        if (g->pop[i].t && --g->pop[i].t < 1)
+        if (g->major && g->pop[i].t && --g->pop[i].t < 1)
             dirty(g, g->pop[i].x, g->pop[i].y, g->pop[i].ndig << 3, 0x10);
 
     draw_frame(g);
@@ -1885,6 +2022,7 @@ void game_init(Game *g, Video *v, const Dar *dar, const char *datpath)
     int i;
 
     memset(g, 0, sizeof *g);
+    g->k = 1;
     g->v = v;
     g->dar = dar;
     strncpy(g->datpath, datpath, sizeof g->datpath - 1);

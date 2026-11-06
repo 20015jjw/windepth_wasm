@@ -42,22 +42,25 @@ enum { SND_BURN = 0, SND_START = 1, SND_ENESHOT = 2, SND_ITEM = 3,
 #define MAX_POPUP  33
 #define MAX_SCORES 10
 
+/* Everything that moves also carries rx/ry, the port's sub-pixel remainder
+ * when the logic runs faster than the original (see `k` below). */
 typedef struct {           /* +0x4d34, stride 0x2c */
     int alive;             /* 0 = free; kind 3 toggles between 1 and 2 */
     int kind;              /* 0..4 from the stage weights, 9 = item fish */
     int x, y;
     int vx, vy;
+    int rx, ry;
     int nvx, nvy;          /* challenge script's post-VChangeTime velocity */
     int face;              /* last non-zero vx, picks the L/R sprite */
     int frame;
     int timer;
 } Enemy;
 
-typedef struct { int frame, x, y, vx, vy; } Bomb;      /* +0x5794, stride 0x14 */
-typedef struct { int frame, kind, x, y, vx, vy; } Shot;/* +0x52e0, stride 0x18 */
+typedef struct { int frame, x, y, vx, vy, ry; } Bomb;          /* +0x5794, stride 0x14 */
+typedef struct { int frame, kind, x, y, vx, vy, rx, ry; } Shot;/* +0x52e0, stride 0x18 */
 typedef struct { int frame, x, y, chain, hits; } Burn; /* +0x5974, stride 0x14 */
 typedef struct { int frame, x, y; } Splash;            /* +0x5d34, stride 0x0c */
-typedef struct { int t, kind, x, y, vx, vy; } Item;    /* +0x5e54, stride 0x18 */
+typedef struct { int t, kind, x, y, vx, vy, rx, ry; } Item;    /* +0x5e54, stride 0x18 */
 typedef struct { int t, x, y, ndig, value, chain; } Popup; /* +0x5eb4, stride 0x18 */
 
 /* A destroyer.  Ship 0 is the original's, and its fields carry the original
@@ -71,6 +74,7 @@ typedef struct {
     int in;               /* still in the run: sinking with no lives left in
                            * the pool puts a co-op player out */
     int x, y, vx;         /* +0x4d04 +0x4d08 +0x4d0c */
+    int rx;
     int bombs_ready;      /* +0x4d14 */
     int trig1, trig2;     /* +0x6204 +0x6200 - button release latches */
     int down;             /* ticks since it sank, 0 = afloat */
@@ -94,6 +98,14 @@ typedef struct {
     Stage st;
     char datpath[512];
     char datpath2p[512];  /* windepth2p.dat: co-op versions of some stages */
+
+    /* The logic rate.  The original ticks every 50ms; at k > 1 game_tick is
+     * meant to be called k times as often.  Only the first call of each k is
+     * a "major" tick, which does everything the original's tick does - timers,
+     * random rolls, steering, animation; the others only move things, by 1/k
+     * of a step each, and test collisions.  k = 1 is the original exactly. */
+    int k, sub, major;
+    int tickmode;         /* the mode this original tick started in */
 
     int mode;             /* +0x500  */
     int pstate;           /* +0x451c */
@@ -121,6 +133,7 @@ typedef struct {
     int live_enemies;     /* +0x4550 */
 
     int plane, planex, planey, planevx, planetimer;  /* +0x4d1c.. +0x4d30 */
+    int planerx;
 
     int blink;            /* +0x61f8 - flips every tick, halves anim rates */
     int wavephase;        /* +0x61f0 */
@@ -150,6 +163,7 @@ typedef struct {
         int boom;         /* pending hit sparks */
         int x, y;
         int vx, vy, dvy;
+        int rx, ry;
         int lastvx;
         int interval, timer, phase, gunalt;
     } boss;
@@ -175,6 +189,7 @@ void game_logo(Game *g);              /* the Bio_100% splash, where a finished
                                        * run returns to before the title */
 void game_title(Game *g);             /* the attract screen */
 void game_stage(Game *g, int no);    /* jump the current run to stage `no` */
+void game_set_rate(Game *g, int k);  /* logic ticks per original 50ms tick */
 int  game_rand(Game *g);
 
 #endif

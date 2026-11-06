@@ -12,6 +12,22 @@
 
 typedef struct { int x, y, w, h; } Rect;
 
+/* A recorded draw, for a front end that renders the frame itself - the
+ * browser's WebGL path - rather than taking the 8bpp surface.  Positions are
+ * in 1/256 px, so something moving at a fine tick rate can sit between
+ * pixels. */
+typedef struct {
+    int pat;
+    int x, y;              /* top left, 1/256 px */
+    int id;                /* the object drawn, so a renderer can follow it
+                            * from one frame to the next; 0 = not followed */
+    int flags;             /* VC_* */
+} VidCmd;
+
+#define VC_TINT 1          /* through the palette remap (ship 1's colours) */
+#define VC_ROW  2          /* just row (flags >> 8) of the pattern, at y */
+#define MAX_CMD 4096
+
 typedef struct {
     unsigned char px[SCR_W * SCR_H];
     Rect dirty[MAX_DIRTY];
@@ -19,6 +35,12 @@ typedef struct {
     int full;              /* next present must push the whole surface */
     int ox, oy;            /* global draw offset (the library's shake) */
     const Dar *dar;
+
+    int raster;            /* draw into px - on unless a front end opts out */
+    int record;            /* append each draw to cmd */
+    VidCmd cmd[MAX_CMD];
+    int ncmd;              /* the front end empties it before each tick */
+    int tag_id, tag_fx, tag_fy;
 } Video;
 
 void vid_init(Video *v, const Dar *dar);
@@ -29,6 +51,11 @@ void vid_clear(Video *v, unsigned char index);
  * the behaviour is identical if it ever isn't. */
 void vid_dirty(Video *v, int x, int y, int w, int h);
 void vid_dirty_all(Video *v);
+
+/* Name the object the next vid_pat* draws, and how far past its x, y it
+ * really is (fx, fy in 1/256 px).  Only recording uses it, and the draw it
+ * applies to clears it. */
+void vid_tag(Video *v, int id, int fx, int fy);
 
 void vid_pat(Video *v, int x, int y, int pat);
 void vid_pat_remap(Video *v, int x, int y, int pat, const unsigned char *lut);
